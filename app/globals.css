@@ -285,3 +285,11 @@ footer > div { display: flex; gap: 1.5rem; }
   .details-grid .full-width { grid-column: auto; }
   .booking-confirmation { margin-top: 2rem; }
 }
+
+.admin-date-filter { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
+.admin-date-filter input, .booking-actions input, .booking-actions select { background: white; color: #111; border: 1px solid #999; border-radius: 4px; padding: .55rem; }
+.booking-actions { display: grid; gap: .5rem; min-width: 190px; max-width: 300px; }
+.booking-actions label { display: grid; gap: .3rem; }
+.booking-actions button { cursor: pointer; background: white; color: #111; border: 1px solid #999; padding: .6rem; border-radius: 4px; }
+.booking-actions button:disabled { opacity: .5; cursor: wait; }
+.booking-actions [role="alert"] { color: #a40016; }

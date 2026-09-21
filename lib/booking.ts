@@ -78,7 +78,7 @@ export function formatPrice(priceCents: number) {
 }
 
 export function dateIsValid(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T12:00:00Z`));
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T12:00:00Z`)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 }
 
 export function getOpeningHours(date: string) {
@@ -136,6 +136,7 @@ export function buildAvailableTimes(
   date: string,
   durationMinutes: number,
   occupiedSlots: Set<string>,
+  handlingMinutes = HANDLING_BUFFER_MINUTES,
 ) {
   const hours = getOpeningHours(date);
   if (!hours) return [];
@@ -145,7 +146,7 @@ export function buildAvailableTimes(
   const currentTime = getCurrentTimeInEindhoven();
   const earliestToday = addMinutes(currentTime, 60);
 
-  const occupiedMinutes = durationMinutes + HANDLING_BUFFER_MINUTES;
+  const occupiedMinutes = durationMinutes + handlingMinutes;
   for (let time = hours.start; addMinutes(time, occupiedMinutes) <= hours.end; time = addMinutes(time, 5)) {
     if (date === today && time < earliestToday) continue;
     if (overlapsBreak(date, time, occupiedMinutes)) continue;

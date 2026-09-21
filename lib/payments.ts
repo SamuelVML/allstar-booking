@@ -14,7 +14,9 @@ export async function releaseExpiredPaymentReservations(database: D1Database) {
 
   await database.batch([
     ...results.map(({ id }) =>
-      database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(id),
+      database.prepare(`DELETE FROM appointment_slots WHERE appointment_id = ? AND EXISTS (
+        SELECT 1 FROM appointments WHERE id = ? AND status = 'payment_pending' AND payment_expires_at <= ?
+      )`).bind(id, id, now),
     ),
     ...results.map(({ id }) =>
       database
@@ -36,7 +38,7 @@ export async function confirmPaidAppointment(
     .prepare(
       `UPDATE appointments
        SET status = 'confirmed', payment_status = 'paid', paid_at = ?, payment_expires_at = NULL
-       WHERE id = ? AND stripe_checkout_session_id = ? AND payment_method = 'stripe'`,
+       WHERE id = ? AND stripe_checkout_session_id = ? AND payment_method = 'stripe' AND status = 'payment_pending'`,
     )
     .bind(new Date().toISOString(), appointmentId, checkoutSessionId)
     .run();
@@ -49,8 +51,10 @@ export async function expirePaymentAppointment(
 ) {
   await database.batch([
     database
-      .prepare("DELETE FROM appointment_slots WHERE appointment_id = ?")
-      .bind(appointmentId),
+      .prepare(`DELETE FROM appointment_slots WHERE appointment_id = ? AND EXISTS (
+        SELECT 1 FROM appointments WHERE id = ? AND stripe_checkout_session_id = ? AND status = 'payment_pending'
+      )`)
+      .bind(appointmentId, appointmentId, checkoutSessionId),
     database
       .prepare(
         `UPDATE appointments

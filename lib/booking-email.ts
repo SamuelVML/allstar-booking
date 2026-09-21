@@ -154,3 +154,40 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+export async function sendBookingChangeNotification(
+  booking: import("@/lib/booking-management").ManagedBooking,
+  action: "cancel" | "reschedule",
+  changeId: string,
+  target?: { date: string; time: string },
+) {
+  const apiKey = env.RESEND_API_KEY?.trim();
+  const from = env.BOOKING_EMAIL_FROM?.trim();
+  const businessName = env.BOOKING_BUSINESS_NAME?.trim();
+  if (!apiKey || !from || !businessName) return false;
+  const subject = `Booking ${action === "cancel" ? "cancelled" : "rescheduled"} · ${booking.reference}`;
+  const text = [
+    `${subject} — ${businessName}`,
+    `Customer: ${booking.customer_name}`,
+    `Service: ${booking.service_name}`,
+    `Previous appointment: ${booking.appointment_date} ${booking.start_time}–${booking.end_time} (Europe/Amsterdam)`,
+    ...(target ? [`New appointment: ${target.date} ${target.time} (Europe/Amsterdam)`, `Service duration: ${booking.duration_minutes} minutes`] : []),
+    ...(action === "cancel" && booking.payment_status === "paid" ? ["Payment was already received. This cancellation does not automatically issue a refund; please contact the shop."] : []),
+    `Reference: ${booking.reference}`,
+  ].join("\n");
+  const recipients = [booking.customer_email, env.BOOKING_ADMIN_EMAIL?.trim()].filter((value): value is string => Boolean(value));
+  const outcomes = await Promise.allSettled(recipients.map(async (to, index) => {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `booking-change/${changeId}/${index}` },
+      body: JSON.stringify({ from, to: [to], subject, text,
+        ...(env.BOOKING_EMAIL_REPLY_TO?.trim() ? { reply_to: env.BOOKING_EMAIL_REPLY_TO.trim() } : {}),
+        html: `<html><body style="font-family:Arial,sans-serif;padding:24px;line-height:1.6"><h1>${escapeHtml(subject)}</h1><p>${escapeHtml(text).replaceAll("\n", "<br>")}</p></body></html>`,
+      }),
+    });
+    if (!response.ok) throw new Error("Booking change email rejected");
+  }));
+  const sent = outcomes.every((result) => result.status === "fulfilled");
+  if (!sent) console.error("Some booking change notifications failed");
+  return sent;
+}

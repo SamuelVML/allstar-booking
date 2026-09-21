@@ -3,6 +3,8 @@ declare namespace Cloudflare {
     DB?: D1Database;
     BUCKET?: R2Bucket;
     ADMIN_EMAILS?: string;
+    CF_ACCESS_TEAM_DOMAIN?: string;
+    CF_ACCESS_AUD?: string;
     RESEND_API_KEY?: string;
     BOOKING_EMAIL_FROM?: string;
     BOOKING_EMAIL_REPLY_TO?: string;

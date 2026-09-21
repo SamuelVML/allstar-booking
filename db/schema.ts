@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, uniqueIndex, text } from "drizzle-orm/sqlite-core";
 
 export const customerAccounts = sqliteTable(
   "customer_accounts",
@@ -24,6 +24,7 @@ export const appointments = sqliteTable(
   {
     id: text("id").primaryKey(),
     reference: text("reference").notNull().unique(),
+    revision: integer("revision").notNull().default(0),
     serviceId: text("service_id").notNull(),
     serviceName: text("service_name").notNull(),
     durationMinutes: integer("duration_minutes").notNull(),
@@ -87,3 +88,16 @@ export const appointmentSlots = sqliteTable(
   },
   (table) => [index("idx_appointment_slots_appointment").on(table.appointmentId)],
 );
+
+export const bookingChanges = sqliteTable("booking_changes", {
+  id: text("id").primaryKey(),
+  appointmentId: text("appointment_id").notNull().references(() => appointments.id),
+  revision: integer("revision").notNull(),
+  action: text("action", { enum: ["cancel", "reschedule", "complete"] }).notNull(),
+  actorId: text("actor_id").notNull(),
+  previousDate: text("previous_date").notNull(),
+  previousTime: text("previous_time").notNull(),
+  newDate: text("new_date"),
+  newTime: text("new_time"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("booking_changes_appointment_revision").on(table.appointmentId, table.revision)]);
