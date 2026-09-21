@@ -17,9 +17,9 @@ if (!database) {
 config.name = workerName;
 config.topLevelName = workerName;
 config.keep_vars = true;
-config.migrations_dir = "../../drizzle";
 database.database_id = databaseId;
 database.database_name = databaseName;
+database.migrations_dir = "../../drizzle";
 
 await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 console.log(`Prepared ${workerName} for D1 database ${databaseName}.`);
