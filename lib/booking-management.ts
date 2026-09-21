@@ -19,14 +19,13 @@ export function validManagementDate(date: string) {
 
 export async function availableForBooking(database: D1Database, booking: ManagedBooking, date: string) {
   const rows = await database.prepare(
-    "SELECT slot_start FROM appointment_slots WHERE slot_start >= ? AND slot_start < ? AND appointment_id != ?",
+    "SELECT slot_start FROM (SELECT slot_start, appointment_id FROM appointment_slots UNION ALL SELECT slot_start, NULL AS appointment_id FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ? AND (appointment_id IS NULL OR appointment_id != ?)",
   ).bind(`${date}T00:00`, `${date}T23:59`, booking.id).all<{ slot_start: string }>();
   return buildAvailableTimes(date, booking.duration_minutes, new Set(rows.results.map((row) => row.slot_start)), booking.handling_minutes);
 }
 
 export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }) {
   if (booking.status !== "confirmed") throw new BookingConflict("Only confirmed bookings can be changed.");
-  if (action === "complete" && !booking.customer_account_id) throw new BookingConflict("This booking has no customer account.");
   if (action === "reschedule") {
     if (!target || !validManagementDate(target.date) || !(await availableForBooking(database, booking, target.date)).includes(target.time)) {
       throw new BookingConflict("That time is unavailable. Choose another slot.");
@@ -46,7 +45,7 @@ export async function changeBooking(database: D1Database, booking: ManagedBookin
   if (action === "complete") {
     statements.push(
       database.prepare(`INSERT INTO loyalty_events (id, customer_account_id, appointment_id, points_delta, event_type)
-        SELECT ?, ?, ?, 1, 'visit_completed' WHERE ${gate}`).bind(crypto.randomUUID(), booking.customer_account_id, booking.id, changeId),
+        SELECT ?, ?, ?, 1, 'visit_completed' WHERE ${gate} AND ? IS NOT NULL`).bind(crypto.randomUUID(), booking.customer_account_id, booking.id, changeId, booking.customer_account_id),
       database.prepare(`UPDATE customer_accounts SET loyalty_points = loyalty_points + 1,
         completed_visits = completed_visits + 1, last_visit_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND ${gate}`).bind(booking.customer_account_id, changeId),
@@ -68,7 +67,7 @@ export async function changeBooking(database: D1Database, booking: ManagedBookin
   let results;
   try { results = await database.batch(statements); }
   catch (error) {
-    if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) throw new BookingConflict("The booking or slot changed. Refresh and try again.");
+    if (error instanceof Error && /UNIQUE constraint failed|Slot unavailable/.test(error.message)) throw new BookingConflict("The booking or slot changed. Refresh and try again.");
     throw error;
   }
   if (results[0].meta.changes !== 1) throw new BookingConflict("The booking changed. Refresh and try again.");

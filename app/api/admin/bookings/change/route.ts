@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     const target = payload.action === "reschedule" ? { date: payload.date!, time: payload.time! } : undefined;
     const change = await changeBooking(database, booking, payload.action, user.id, target);
     let notificationsSent = true;
-    if (payload.action !== "complete") {
+    if (payload.action !== "complete" && booking.customer_email) {
       notificationsSent = await sendBookingChangeNotification(booking, payload.action, change.changeId, target);
     }
     return Response.json({ changed: true, revision: change.revision, notificationsSent });

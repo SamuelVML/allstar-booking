@@ -137,6 +137,7 @@ export function buildAvailableTimes(
   durationMinutes: number,
   occupiedSlots: Set<string>,
   handlingMinutes = HANDLING_BUFFER_MINUTES,
+  leadMinutes = 60,
 ) {
   const hours = getOpeningHours(date);
   if (!hours) return [];
@@ -144,7 +145,7 @@ export function buildAvailableTimes(
   const times: string[] = [];
   const today = getTodayInEindhoven();
   const currentTime = getCurrentTimeInEindhoven();
-  const earliestToday = addMinutes(currentTime, 60);
+  const earliestToday = addMinutes(currentTime, leadMinutes);
 
   const occupiedMinutes = durationMinutes + handlingMinutes;
   for (let time = hours.start; addMinutes(time, occupiedMinutes) <= hours.end; time = addMinutes(time, 5)) {

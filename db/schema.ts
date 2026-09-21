@@ -25,6 +25,8 @@ export const appointments = sqliteTable(
     id: text("id").primaryKey(),
     reference: text("reference").notNull().unique(),
     revision: integer("revision").notNull().default(0),
+    source: text("source").notNull().default("online"),
+    createdBy: text("created_by"),
     serviceId: text("service_id").notNull(),
     serviceName: text("service_name").notNull(),
     durationMinutes: integer("duration_minutes").notNull(),
@@ -101,3 +103,27 @@ export const bookingChanges = sqliteTable("booking_changes", {
   newTime: text("new_time"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [uniqueIndex("booking_changes_appointment_revision").on(table.appointmentId, table.revision)]);
+
+export const timeOff = sqliteTable("time_off", {
+  id: text("id").primaryKey(),
+  date: text("date").notNull(),
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+  reason: text("reason").notNull(),
+  actorId: text("actor_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  removedAt: text("removed_at"),
+  removedBy: text("removed_by"),
+});
+export const timeOffSlots = sqliteTable("time_off_slots", {
+  slotStart: text("slot_start").primaryKey(),
+  timeOffId: text("time_off_id").notNull().references(() => timeOff.id),
+});
+export const paymentReceipts = sqliteTable("payment_receipts", {
+  id: text("id").primaryKey(),
+  appointmentId: text("appointment_id").notNull().unique().references(() => appointments.id),
+  amountCents: integer("amount_cents").notNull(),
+  method: text("method").notNull(),
+  actorId: text("actor_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

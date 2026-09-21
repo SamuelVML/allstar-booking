@@ -62,6 +62,8 @@ const changes = load('app/api/admin/bookings/change/route.ts');
 const complete = load('app/api/admin/bookings/complete/route.ts');
 const availability = load('app/api/admin/bookings/availability/route.ts');
 const payments = load('lib/payments.ts');
+const backstage = load('lib/backstage.ts');
+const operations = load('app/api/admin/operations/route.ts');
 const issuer = 'https://test-team.cloudflareaccess.com';
 Object.assign(env, { CF_ACCESS_TEAM_DOMAIN: issuer, CF_ACCESS_AUD: 'staff-app', ADMIN_EMAILS: 'barber@example.com' });
 async function token(overrides = {}, signingKey = privateKey) {
@@ -80,7 +82,7 @@ assert.equal(await auth.getStaffUser(tokenHeaders(await token({}, wrongKey.priva
 env.CF_ACCESS_AUD = ''; assert.equal(await auth.getStaffUser(tokenHeaders(validToken)), null); env.CF_ACCESS_AUD = 'staff-app';
 const headers = { 'cf-access-jwt-assertion': validToken, 'content-type': 'application/json', origin: 'https://booking.example.com' };
 assert.equal(await auth.authoriseStaffMutation(new Request('https://booking.example.com/api/admin/bookings/change', { method: 'POST', headers: { ...headers, origin: 'https://evil.example.com' } })), null);
-for (const handler of [changes.POST, complete.POST]) {
+for (const handler of [changes.POST, complete.POST, operations.POST]) {
   const response = await handler(new Request('https://booking.example.com/api/admin/bookings/change', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-access-authenticated-user-email': 'barber@example.com' }, body: JSON.stringify({ reference: 'TEST', revision: 0 }) }));
   assert.equal(response.status, 403);
 }
@@ -128,4 +130,51 @@ await assert.rejects(management.changeBooking(database,finish,'complete','staff-
 assert.equal(db.prepare("SELECT loyalty_points FROM customer_accounts WHERE id='customer'").get().loyalty_points,1);
 await payments.expirePaymentAppointment(database,'finish','session-finish');assert.equal(slots('finish').length,8);
 console.log('PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety');
+
+const blockId = crypto.randomUUID();
+await backstage.blockTime(database, {id:blockId,date,start:'11:00',end:'11:30',reason:'Personal appointment'}, 'staff-id');
+assert.equal((await management.availableForBooking(database,row('occupied'),date)).includes('11:00'),false);
+// Database triggers guard public booking inserts too, even after an earlier availability read.
+assert.throws(() => db.prepare('INSERT INTO appointment_slots VALUES (?,?)').run(`${date}T11:00`,'occupied'),/Slot unavailable/);
+const overlap = crypto.randomUUID();
+await assert.rejects(backstage.blockTime(database,{id:overlap,date,start:'12:55',end:'13:15',reason:'Overlap'},'staff-id'),/slot or booking changed/);
+assert.equal(db.prepare('SELECT count(*) AS n FROM time_off WHERE id=?').get(overlap).n,0);
+assert.equal(db.prepare('SELECT count(*) AS n FROM time_off_slots WHERE slot_start=?').get(`${date}T12:55`).n,0,'partial block must roll back');
+await backstage.removeBlock(database,blockId,'staff-id');
+await backstage.removeBlock(database,blockId,'staff-id');
+assert.equal(db.prepare('SELECT count(*) AS n FROM time_off_slots WHERE time_off_id=?').get(blockId).n,0);
+assert.equal(db.prepare('SELECT removed_by FROM time_off WHERE id=?').get(blockId).removed_by,'staff-id');
+const walkId = crypto.randomUUID();
+await backstage.createWalkIn(database,{id:walkId,date,time:'11:00',serviceId:'haircut',name:'Walk-in',notes:''},'staff-id');
+assert.equal(slots(walkId).length,8); assert.equal(row(walkId).source,'walk_in');
+assert.equal(row(walkId).payment_status,'due_at_shop');
+await management.changeBooking(database,row(walkId),'complete','staff-id');
+assert.equal(row(walkId).status,'completed');
+assert.equal(row(walkId).payment_status,'due_at_shop','completion must not record payment');
+assert.equal(db.prepare('SELECT count(*) AS n FROM loyalty_events WHERE appointment_id=?').get(walkId).n,0);
+const receipt = {id:crypto.randomUUID(), reference:row(walkId).reference, revision:row(walkId).revision, method:'card'};
+await backstage.recordPayment(database,receipt,'staff-id');
+await assert.rejects(backstage.recordPayment(database,receipt,'staff-id'),/Already paid/);
+await assert.rejects(backstage.recordPayment(database,{...receipt,id:crypto.randomUUID(),revision:row(walkId).revision},'staff-id'),/Already paid/);
+assert.equal(row(walkId).payment_status,'paid'); assert.equal(row(walkId).payment_method,'card');
+assert.equal(db.prepare('SELECT amount_cents FROM payment_receipts WHERE appointment_id=?').get(walkId).amount_cents,3500);
+assert.equal(db.prepare('SELECT count(*) AS n FROM payment_receipts WHERE appointment_id=?').get(walkId).n,1);
+await assert.rejects(backstage.recordPayment(database,{id:crypto.randomUUID(),reference:'paid',revision:row('paid').revision,method:'cash'},'staff-id'),/Already paid/);
+// A time-off block wins between the walk-in availability read and its transaction.
+const walkRaceId = crypto.randomUUID();
+const blockedRace = {...database, async batch(statements) {
+  await backstage.blockTime(database,{id:crypto.randomUUID(),date,start:'18:00',end:'18:40',reason:'Race'},'staff-id');
+  return database.batch(statements);
+}};
+await assert.rejects(backstage.createWalkIn(blockedRace,{id:walkRaceId,date,time:'18:00',serviceId:'haircut',name:'Walk-in',notes:''},'staff-id'),/slot or booking changed/);
+assert.equal(row(walkRaceId),undefined);
+const blockedMove = {...database, async batch(statements) {
+  await backstage.blockTime(database,{id:crypto.randomUUID(),date,start:'17:20',end:'18:00',reason:'Race'},'staff-id');
+  return database.batch(statements);
+}};
+await assert.rejects(management.changeBooking(blockedMove,row('occupied'),'reschedule','staff-id',{date,time:'17:20'}),/slot changed/);
+assert.equal(row('occupied').start_time,'13:00'); assert.equal(slots('occupied').length,8);
+const bad = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({action:'payment',id:crypto.randomUUID(),reference:'occupied',revision:0,method:'wire'})}));
+assert.equal(bad.status,400);
+console.log('PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations');
 db.close();

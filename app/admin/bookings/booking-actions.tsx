@@ -2,9 +2,9 @@
 
 import { useRef, useState } from "react";
 
-type Props = { reference: string; revision: number; date: string; paid: boolean };
+type Props = { reference: string; revision: number; date: string; paid: boolean; loyalty?: boolean };
 
-export default function BookingActions({ reference, revision, date: initialDate, paid }: Props) {
+export default function BookingActions({ reference, revision, date: initialDate, paid, loyalty = true }: Props) {
   const [mode, setMode] = useState<"idle" | "cancel" | "reschedule" | "complete">("idle");
   const [date, setDate] = useState(initialDate);
   const [times, setTimes] = useState<string[]>([]);
@@ -57,7 +57,7 @@ export default function BookingActions({ reference, revision, date: initialDate,
         <label>New date<input type="date" value={date} disabled={busy} onChange={(event) => void loadTimes(event.target.value)} /></label>
         <label>Available time<select value={time} disabled={busy} onChange={(event) => setTime(event.target.value)}><option value="">Choose a time</option>{times.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
         <small>Service duration and handling buffer are reserved automatically.</small>
-      </> : <p>{mode === "cancel" ? `Cancel ${reference} and release its slot?${paid ? " Payment was received; handle any refund separately in Stripe." : ""}` : "Mark this visit completed and award one loyalty point? This does not record payment."}</p>}
+      </> : <p>{mode === "cancel" ? `Cancel ${reference} and release its slot?${paid ? " Payment was received; handle any refund separately." : ""}` : `Mark this visit completed${loyalty ? " and award one loyalty point" : ""}? This does not record payment.`}</p>}
       <button type="button" disabled={busy || (mode === "reschedule" && !time)} onClick={save}>{busy ? "Please wait…" : "Confirm"}</button>
       <button type="button" disabled={busy} onClick={() => { setMode("idle"); setMessage(""); }}>Back</button>
     </>}

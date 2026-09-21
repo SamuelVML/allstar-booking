@@ -36,7 +36,7 @@ export async function GET(request: Request) {
     const rangeEnd = date || maximumDate;
     const rows = await database
       .prepare(
-        "SELECT slot_start FROM appointment_slots WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${rangeStart}T00:00`, `${rangeEnd}T23:59`)
       .all<{ slot_start: string }>();

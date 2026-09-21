@@ -134,3 +134,14 @@ The portable build runs Vinext directly without a host `timeout` command. The ma
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+
+
+### Backstage daily operations
+
+Staff can add a walk-in, block/remove time off, and record full cash or card payments from `/admin/bookings`. Select the appointment date first. Walk-ins use the service catalogue and reserve handling time; staff can start at the current time without the online one-hour lead time. They have no customer email/account, receive no automatic emails, and earn no loyalty points. Existing online bookings retain their loyalty flow.
+
+Time-off blocks are stored separately from appointments. Database triggers reject slot collisions in both directions, including concurrent public bookings and reschedules. Removing a block reopens its slots and retains its audit record. The `0004` migration installs these triggers alongside the new tables; do not remove them when regenerating migrations.
+
+Payment recording is for money already received at the shop. It records the full booking amount once, with staff identity, method and timestamp. It does not charge a card or issue a refund. Stripe bookings cannot be manually marked paid. Completion and payment are independent actions.
+
+The date view shows booked value for confirmed/completed visits and recorded payments against appointments on that date (including paid cancellations). These are appointment-date totals, not daily cash receipts, profit, or refund-adjusted revenue. Partial payments/refunds and walk-in customer-account linking are not included in this version.

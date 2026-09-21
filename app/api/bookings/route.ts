@@ -74,7 +74,7 @@ export async function POST(request: Request) {
     const serviceName = `${service.name}${colourAddOn ? " + colour" : ""}`;
     const occupiedRows = await database
       .prepare(
-        "SELECT slot_start FROM appointment_slots WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${date}T00:00`, `${date}T23:59`)
       .all<{ slot_start: string }>();
@@ -245,7 +245,7 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    if (message.includes("UNIQUE") || message.includes("constraint")) {
+    if (message.includes("UNIQUE") || message.includes("constraint") || message.includes("Slot unavailable")) {
       return Response.json(
         { error: "That time was just booked. Please choose another time." },
         { status: 409 },

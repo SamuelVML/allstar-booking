@@ -293,3 +293,18 @@ footer > div { display: flex; gap: 1.5rem; }
 .booking-actions button { cursor: pointer; background: white; color: #111; border: 1px solid #999; padding: .6rem; border-radius: 4px; }
 .booking-actions button:disabled { opacity: .5; cursor: wait; }
 .booking-actions [role="alert"] { color: #a40016; }
+
+.backstage-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 24px 0; }
+.backstage-totals > div { border: 1px solid #ddd; border-radius: 12px; padding: 20px; display: grid; gap: 8px; }
+.backstage-totals strong { font-size: 2rem; }
+.backstage-totals small { color: #666; }
+.backstage-tools { margin-bottom: 24px; }
+.backstage-form { padding: 20px; border: 1px solid #ddd; border-radius: 12px; margin: 16px 0; display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
+.backstage-form h2, .backstage-form p { width: 100%; }
+.backstage-form label { display: grid; gap: 6px; flex: 1 1 180px; }
+.backstage-form input, .backstage-form select, .backstage-payment select { padding: 10px; border: 1px solid #aaa; border-radius: 6px; width: 100%; background: white; color: #111; }
+.backstage-blocks > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #ddd; }
+.backstage-payment { margin-top: 12px; max-width: 300px; }
+.backstage-payment form { display: grid; gap: 10px; }
+.backstage-payment p { white-space: normal; }
+@media (max-width: 600px) { .backstage-totals { grid-template-columns: 1fr; } }
