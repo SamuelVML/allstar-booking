@@ -1,5 +1,4 @@
 import { headers } from "next/headers";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStaffUser } from "@/lib/staff-auth";
 import { dateIsValid, formatPrice, getTodayInEindhoven } from "@/lib/booking";
@@ -58,14 +57,14 @@ export default async function RevenuePage({
           <h1 className="display display-m">Revenue</h1>
           <div className="seg" role="tablist" aria-label="Period">
             {PERIODS.map((option) => (
-              <Link
+              <a
                 key={option.id}
                 role="tab"
                 aria-selected={period === option.id}
                 href={`/admin/revenue?period=${option.id}&date=${date}`}
               >
                 {option.label}
-              </Link>
+              </a>
             ))}
           </div>
         </div>
@@ -138,8 +137,8 @@ export default async function RevenuePage({
         </dl>
 
         <p className="muted pretty" style={{ margin: "16px 0 0", fontSize: 12 }}>
-          Totals follow appointment dates, not the day money changed hands. Paid cancellations
-          stay in recorded payments; refunds are handled outside Backstage.
+          Totals follow appointment dates, not the day money changed hands. Refunded Stripe
+          payments are removed from recorded payments automatically.
         </p>
       </div>
     </>

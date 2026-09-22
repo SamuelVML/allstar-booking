@@ -8,9 +8,8 @@
 
 import {
   addMinutes,
-  DAILY_BREAKS,
-  HANDLING_BUFFER_MINUTES,
-  OPENING_HOURS,
+  DEFAULT_BOOKING_SETTINGS,
+  type BookingSettings,
 } from "@/lib/booking";
 
 export type AdminAppointment = {
@@ -21,6 +20,8 @@ export type AdminAppointment = {
   service_id: string;
   service_name: string;
   price_cents: number;
+  duration_minutes: number;
+  handling_minutes: number;
   appointment_date: string;
   start_time: string;
   end_time: string;
@@ -93,12 +94,18 @@ export function mondayOf(date: string) {
   return shiftDate(date, -((weekdayOf(date) + 6) % 7));
 }
 
-export function openingHoursFor(date: string) {
-  return OPENING_HOURS[weekdayOf(date)] ?? null;
+export function openingHoursFor(
+  date: string,
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
+) {
+  return settings.openingHours[weekdayOf(date)] ?? null;
 }
 
-export function breaksFor(date: string) {
-  return DAILY_BREAKS[weekdayOf(date)] ?? [];
+export function breaksFor(
+  date: string,
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
+) {
+  return settings.dailyBreaks[weekdayOf(date)] ?? [];
 }
 
 export function isLive(appointment: AdminAppointment) {
@@ -109,8 +116,15 @@ export function isLive(appointment: AdminAppointment) {
  * What the money is doing. Booked value is never described as received: only
  * `payment_status === "paid"` counts as money in.
  */
-export function paymentInfo(appointment: AdminAppointment): PaymentInfo {
+export function paymentInfo(
+  appointment: AdminAppointment,
+  paymentHoldMinutes = DEFAULT_BOOKING_SETTINGS.paymentHoldMinutes,
+): PaymentInfo {
   const paid = appointment.payment_status === "paid";
+
+  if (appointment.payment_status === "refunded") {
+    return { label: "Refunded", line: "Stripe payment refunded", tone: "cancelled" };
+  }
 
   if (appointment.status === "cancelled") {
     return paid
@@ -139,7 +153,7 @@ export function paymentInfo(appointment: AdminAppointment): PaymentInfo {
   if (appointment.status === "payment_pending") {
     return {
       label: "Awaiting online",
-      line: "Awaiting online payment — the slot is held for 30 minutes",
+      line: `Awaiting online payment — the slot is held for ${paymentHoldMinutes} minutes`,
       tone: "pending",
     };
   }
@@ -165,18 +179,23 @@ export function occupiedRanges(
   appointments: AdminAppointment[],
   blocks: TimeOffBlock[],
   exceptReference?: string,
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
 ) {
   const ranges: Array<[number, number]> = [];
   for (const appointment of appointments) {
     if (!isLive(appointment)) continue;
     if (appointment.reference === exceptReference) continue;
     const start = toMinutes(appointment.start_time);
-    ranges.push([start, toMinutes(appointment.end_time) + HANDLING_BUFFER_MINUTES]);
+    ranges.push([
+      start,
+      toMinutes(appointment.end_time) +
+        (appointment.handling_minutes ?? settings.handlingBufferMinutes),
+    ]);
   }
   for (const block of blocks) {
     ranges.push([toMinutes(block.start_time), toMinutes(block.end_time)]);
   }
-  for (const period of breaksFor(date)) {
+  for (const period of breaksFor(date, settings)) {
     ranges.push([toMinutes(period.start), toMinutes(period.end)]);
   }
   return ranges.sort((a, b) => a[0] - b[0]);
@@ -187,15 +206,16 @@ export function openMinutes(
   date: string,
   appointments: AdminAppointment[],
   blocks: TimeOffBlock[],
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
 ) {
-  const hours = openingHoursFor(date);
+  const hours = openingHoursFor(date, settings);
   if (!hours) return 0;
   const total = toMinutes(hours.end) - toMinutes(hours.start);
 
   // Merge overlaps so a break inside an appointment is not counted twice.
   let used = 0;
   let cursor = -1;
-  for (const [start, end] of occupiedRanges(date, appointments, blocks)) {
+  for (const [start, end] of occupiedRanges(date, appointments, blocks, undefined, settings)) {
     const from = Math.max(start, cursor, toMinutes(hours.start));
     const to = Math.min(end, toMinutes(hours.end));
     if (to > from) used += to - from;
@@ -226,8 +246,9 @@ export function buildAgenda(
   date: string,
   appointments: AdminAppointment[],
   blocks: TimeOffBlock[],
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
 ): AgendaEntry[] {
-  const hours = openingHoursFor(date);
+  const hours = openingHoursFor(date, settings);
   const items: Array<{ start: number; end: number; entry: AgendaEntry }> = [
     ...appointments.map((appointment) => ({
       start: toMinutes(appointment.start_time),
@@ -239,7 +260,7 @@ export function buildAgenda(
       end: toMinutes(block.end_time),
       entry: { kind: "block", block } as AgendaEntry,
     })),
-    ...breaksFor(date).map((period) => ({
+    ...breaksFor(date, settings).map((period) => ({
       start: toMinutes(period.start),
       end: toMinutes(period.end),
       entry: { kind: "break", start: period.start, end: period.end } as AgendaEntry,
@@ -257,7 +278,9 @@ export function buildAgenda(
     }
     agenda.push(item.entry);
     if (!isCancelled) {
-      const tail = item.entry.kind === "appointment" ? HANDLING_BUFFER_MINUTES : 0;
+      const tail = item.entry.kind === "appointment"
+        ? (item.entry.appointment.handling_minutes ?? settings.handlingBufferMinutes)
+        : 0;
       cursor = Math.max(cursor, item.end + tail);
     }
   }
@@ -291,7 +314,7 @@ export function durationOf(appointment: AdminAppointment) {
 
 /**
  * Start times a walk-in could take on this date, at the 15-minute rhythm the
- * barber books to. Staff have no one-hour lead time, but opening hours,
+ * barber books to. Staff have no online lead time, but opening hours,
  * breaks, existing bookings and the handling buffer all still apply.
  */
 export function staffSlots(
@@ -299,12 +322,23 @@ export function staffSlots(
   serviceMinutes: number,
   appointments: AdminAppointment[],
   blocks: TimeOffBlock[],
-  options: { from?: string; exceptReference?: string } = {},
+  options: {
+    from?: string;
+    exceptReference?: string;
+    settings?: BookingSettings;
+  } = {},
 ) {
-  const hours = openingHoursFor(date);
+  const settings = options.settings ?? DEFAULT_BOOKING_SETTINGS;
+  const hours = openingHoursFor(date, settings);
   if (!hours) return [];
-  const occupied = occupiedRanges(date, appointments, blocks, options.exceptReference);
-  const needed = serviceMinutes + HANDLING_BUFFER_MINUTES;
+  const occupied = occupiedRanges(
+    date,
+    appointments,
+    blocks,
+    options.exceptReference,
+    settings,
+  );
+  const needed = serviceMinutes + settings.handlingBufferMinutes;
   const earliest = options.from ? toMinutes(options.from) : -1;
 
   const slots: Array<{ time: string; available: boolean }> = [];

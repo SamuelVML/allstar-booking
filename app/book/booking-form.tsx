@@ -4,9 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   addMinutes,
+  type BookingSettings,
   formatPrice,
-  HANDLING_BUFFER_MINUTES,
-  OPENING_HOURS,
   SERVICES,
 } from "@/lib/booking";
 import {
@@ -23,7 +22,6 @@ import SuccessView, { type Booking } from "./success-view";
 const TOTAL_STEPS = 7;
 /** Customer-facing recommendations and availability refresh once a minute. */
 const CUSTOMER_REFRESH_MS = 60_000;
-const BOOKING_WINDOW_DAYS = 60;
 const COLOUR_ADD_ON_MINUTES = 30;
 const COLOUR_ADD_ON_CENTS = 2250;
 const PHONE = "+31686357350";
@@ -115,8 +113,12 @@ function weekday(date: string) {
  * anything missing from that list is drawn crossed out rather than hidden —
  * a full day has to look full.
  */
-function candidateTimes(date: string, occupiedMinutes: number) {
-  const hours = OPENING_HOURS[weekday(date)];
+function candidateTimes(
+  date: string,
+  occupiedMinutes: number,
+  openingHours: BookingSettings["openingHours"],
+) {
+  const hours = openingHours[weekday(date)];
   if (!hours) return [];
   const times: string[] = [];
   for (
@@ -135,6 +137,7 @@ export default function BookingForm({
   initialLanguage,
   stripeEnabled,
   today,
+  bookingSettings,
 }: {
   initialService: string;
   initialColourAddOn: boolean;
@@ -142,6 +145,7 @@ export default function BookingForm({
   stripeEnabled: boolean;
   /** Today in Europe/Amsterdam, resolved on the server. */
   today: string;
+  bookingSettings: BookingSettings;
 }) {
   const router = useRouter();
 
@@ -181,7 +185,7 @@ export default function BookingForm({
   const serviceName =
     serviceLabel(service.id, service.name, language) +
     (addOn ? COLOUR_ADD_ON_SUFFIX[language] : "");
-  const lastDate = addDays(today, BOOKING_WINDOW_DAYS);
+  const lastDate = addDays(today, bookingSettings.bookingWindowDays);
 
   const dateLabel = useMemo(() => {
     if (!date) return "";
@@ -424,7 +428,7 @@ export default function BookingForm({
       value,
       day: new Date(`${value}T12:00:00Z`).getUTCDate(),
       past,
-      closed: !OPENING_HOURS[weekday(value)] || value > lastDate,
+      closed: !bookingSettings.openingHours[weekday(value)] || value > lastDate,
       isToday: value === today,
       selected: value === date,
     };
@@ -441,8 +445,8 @@ export default function BookingForm({
   const monthLabel = startMonth === endMonth ? startMonth : `${startMonth} – ${endMonth}`;
 
   const dateHours = date
-    ? (OPENING_HOURS[weekday(date)]
-        ? `${OPENING_HOURS[weekday(date)]!.start} – ${OPENING_HOURS[weekday(date)]!.end}`
+    ? (bookingSettings.openingHours[weekday(date)]
+        ? `${bookingSettings.openingHours[weekday(date)]!.start} – ${bookingSettings.openingHours[weekday(date)]!.end}`
         : t.closedWord)
     : "";
 
@@ -451,7 +455,14 @@ export default function BookingForm({
   // bookable time that falls between grid steps is never hidden — on a packed
   // day that off-grid slot may be the only one left.
   const allTimes = date
-    ? [...new Set([...candidateTimes(date, totalDuration + HANDLING_BUFFER_MINUTES), ...times])].sort()
+    ? [...new Set([
+        ...candidateTimes(
+          date,
+          totalDuration + bookingSettings.handlingBufferMinutes,
+          bookingSettings.openingHours,
+        ),
+        ...times,
+      ])].sort()
     : [];
   const timeGroups = [
     { label: t.morning, from: 0, to: 12 },
@@ -511,7 +522,19 @@ export default function BookingForm({
     },
   ];
 
-  const paymentFootnote = paymentMethod === "stripe" ? t.footOnline : t.footShop;
+  const onlinePaymentBody = language === "nl"
+    ? `Kaart, iDEAL of Apple Pay via Stripe. Je tijd blijft ${bookingSettings.paymentHoldMinutes} minuten voor je gereserveerd terwijl je betaalt.`
+    : `Card, iDEAL or Apple Pay via Stripe. Your slot is held for ${bookingSettings.paymentHoldMinutes} minutes while you pay.`;
+  const paymentFootnote = paymentMethod === "stripe"
+    ? language === "nl"
+      ? `Je gaat naar de beveiligde betaalpagina van Stripe. Je tijd blijft ${bookingSettings.paymentHoldMinutes} minuten gereserveerd.`
+      : `You'll be sent to Stripe's secure checkout. Your slot is reserved for ${bookingSettings.paymentHoldMinutes} minutes.`
+    : t.footShop;
+  const stepHint = step === 2
+    ? language === "nl"
+      ? `Zondag zijn we gesloten. Boek tot ${bookingSettings.bookingWindowDays} dagen vooruit.`
+      : `We're closed on Sundays. Book up to ${bookingSettings.bookingWindowDays} days ahead.`
+    : t.hints[step - 1];
   const barSubtitle =
     (step >= 3 && date ? dateLabel : serviceName) + (time && step > 3 ? ` · ${time}` : "");
   const nextLabel =
@@ -551,7 +574,7 @@ export default function BookingForm({
       <div className="flow-body">
         <div className="flow-body-inner" aria-live="polite">
           <h1 className="display display-m">{t.titles[step - 1]}</h1>
-          {t.hints[step - 1] ? <p className="hint pretty">{t.hints[step - 1]}</p> : null}
+          {stepHint ? <p className="hint pretty">{stepHint}</p> : null}
 
           {/* 1 — Service ------------------------------------------------- */}
           {step === 1 && (
@@ -972,7 +995,7 @@ export default function BookingForm({
                     <span className="kicker">{t.payOnlineKicker}</span>
                     <strong>{t.payOnlineTitle}</strong>
                     <span className="body pretty">
-                      {stripeEnabled ? t.payOnlineBody : t.payOnlineOff}
+                      {stripeEnabled ? onlinePaymentBody : t.payOnlineOff}
                     </span>
                   </span>
                   <b>{formatPrice(totalPrice)}</b>

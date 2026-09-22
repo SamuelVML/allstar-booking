@@ -8,7 +8,7 @@ import { getD1 } from "@/db";
 import type { AdminAppointment, TimeOffBlock } from "@/lib/backstage-view";
 
 const APPOINTMENT_COLUMNS = `reference, revision, source, customer_account_id, service_id, service_name,
-  price_cents, appointment_date, start_time, end_time, customer_name, customer_email,
+  price_cents, duration_minutes, handling_minutes, appointment_date, start_time, end_time, customer_name, customer_email,
   customer_phone, notes, status, payment_method, payment_status`;
 
 export async function readDay(date: string) {

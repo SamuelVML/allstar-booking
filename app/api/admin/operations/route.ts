@@ -2,11 +2,30 @@ import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
 import { BookingConflict } from "@/lib/booking-management";
-import { blockTime, createWalkIn, recordPayment, removeBlock } from "@/lib/backstage";
+import {
+  blockFullDays,
+  blockTime,
+  createWalkIn,
+  recordPayment,
+  removeBlock,
+  timeOffConflicts,
+} from "@/lib/backstage";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
+import { readBookingSettings } from "@/lib/booking-settings";
+import { changeBooking } from "@/lib/booking-management";
+import { refundCancelledBooking } from "@/lib/refunds";
+import { sendBookingChangeNotification } from "@/lib/booking-email";
 
 const schema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("block"), id: z.string().uuid(), date: z.string(), start: z.string(), end: z.string(), reason: z.string().trim().min(1).max(200) }),
+  z.object({
+    action: z.literal("block_range"),
+    id: z.string().uuid(),
+    fromDate: z.string(),
+    toDate: z.string(),
+    reason: z.string().trim().min(1).max(200),
+    cancelConflicts: z.boolean().default(false),
+  }),
   z.object({ action: z.literal("unblock"), id: z.string().uuid() }),
   z.object({ action: z.literal("walk_in"), id: z.string().uuid(), date: z.string(), time: z.string(), serviceId: z.string(), name: z.string().trim().min(1).max(80), notes: z.string().trim().max(1000) }),
   z.object({ action: z.literal("payment"), id: z.string().uuid(), reference: z.string().min(1).max(80), revision: z.number().int().nonnegative(), method: z.enum(["cash", "card"]) }),
@@ -19,11 +38,59 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Check the form fields and try again." }, { status: 400 });
   try {
     const database = getD1();
+    const stored = await readBookingSettings(database);
     const input = parsed.data;
-    if (input.action === "block" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
-    if (input.action === "block") await blockTime(database, input, user.id);
+    if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
+    if (input.action === "block") await blockTime(database, input, user.id, stored);
+    if (input.action === "block_range") {
+      const conflicts = await timeOffConflicts(database, input.fromDate, input.toDate);
+      if (conflicts.length > 0 && !input.cancelConflicts) {
+        return Response.json(
+          {
+            error: "Existing appointments must be rescheduled or cancelled before this vacation can be blocked.",
+            conflicts: conflicts.map((booking) => ({
+              reference: booking.reference,
+              revision: booking.revision,
+              date: booking.appointment_date,
+              time: booking.start_time,
+              customer: booking.customer_name,
+              paidOnline:
+                booking.payment_status === "paid" && booking.payment_method === "stripe",
+              priceCents: booking.price_cents,
+            })),
+          },
+          { status: 409 },
+        );
+      }
+
+      let refundsPending = 0;
+      let notificationsSent = true;
+      for (const booking of conflicts) {
+        const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
+        const refundStatus = await refundCancelledBooking(database, booking, user.id);
+        if (refundStatus === "pending") refundsPending += 1;
+        if (booking.customer_email) {
+          notificationsSent =
+            (await sendBookingChangeNotification(
+              booking,
+              "cancel",
+              change.changeId,
+              undefined,
+              refundStatus,
+            )) && notificationsSent;
+        }
+      }
+      const blockedDays = await blockFullDays(database, input, user.id, stored);
+      return Response.json({
+        saved: true,
+        blockedDays,
+        cancelledBookings: conflicts.length,
+        refundsPending,
+        notificationsSent,
+      });
+    }
     if (input.action === "unblock") await removeBlock(database, input.id, user.id);
-    if (input.action === "walk_in") await createWalkIn(database, input, user.id);
+    if (input.action === "walk_in") await createWalkIn(database, input, user.id, stored);
     if (input.action === "payment") await recordPayment(database, input, user.id);
     return Response.json({ saved: true });
   } catch (error) {

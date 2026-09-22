@@ -2,8 +2,9 @@ import { headers } from "next/headers";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStaffUser } from "@/lib/staff-auth";
-import { formatPrice, LOYALTY_REWARD_POINTS } from "@/lib/booking";
+import { formatPrice } from "@/lib/booking";
 import { readCustomer, searchCustomers } from "@/lib/backstage-data";
+import { readBookingSettings } from "@/lib/booking-settings";
 import { paymentInfo, TONE_COLOR } from "@/lib/backstage-view";
 import { ArrowLeft, StarMark } from "@/lib/icons";
 import CustomerSearch from "./search";
@@ -35,6 +36,7 @@ export default async function CustomersPage({
 
   const params = await searchParams;
   const query = (params.q ?? "").slice(0, 100);
+  const { settings } = await readBookingSettings();
 
   /* ------------------------------------------------------------- detail */
 
@@ -97,10 +99,10 @@ export default async function CustomersPage({
               <span className="eyebrow eyebrow-s">Loyalty points</span>
               <div className="with-unit">
                 <b>{account.loyalty_points}</b>
-                <span>/ {LOYALTY_REWARD_POINTS}</span>
+                <span>/ {settings.loyaltyRewardPoints}</span>
               </div>
               <div className="pips" aria-hidden="true">
-                {Array.from({ length: LOYALTY_REWARD_POINTS }, (_, index) => (
+                {Array.from({ length: settings.loyaltyRewardPoints }, (_, index) => (
                   <i key={index} className={index < account.loyalty_points ? "on" : undefined} />
                 ))}
               </div>
@@ -205,7 +207,7 @@ export default async function CustomersPage({
         </p>
       ) : (
         customers.map((customer) => (
-          <Link
+          <a
             key={customer.id}
             className="customer-row"
             href={`/admin/customers?id=${encodeURIComponent(customer.id)}`}
@@ -224,7 +226,7 @@ export default async function CustomersPage({
               <StarMark />
               {customer.loyalty_points}
             </span>
-          </Link>
+          </a>
         ))
       )}
 

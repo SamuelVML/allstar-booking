@@ -89,6 +89,13 @@ function load(relative) {
 
   const resolve = name => {
     if (mocks[name]) return mocks[name];
+    if (name === '@/lib/booking') {
+      return {
+        ...load('lib/booking.ts'),
+        getTodayInEindhoven: () => DAY,
+        getCurrentTimeInEindhoven: () => '12:30',
+      };
+    }
     if (name.startsWith('@/')) {
       const base = path.resolve(root, name.slice(2));
       for (const extension of ['.tsx', '.ts']) {
@@ -121,11 +128,12 @@ for (const file of [
   "app/admin/nav.tsx",
   "app/admin/bookings/page.tsx",
   "app/admin/calendar/page.tsx",
+  "app/admin/revenue/page.tsx",
 ]) {
   const navigationSource = fs.readFileSync(file, "utf8");
   assert.doesNotMatch(
     navigationSource,
-    /from ["']next\\/link["']/,
+    /from ["']next\/link["']/,
     `${file} uses plain same-origin anchors for dependable Worker navigation`,
   );
 }

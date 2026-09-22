@@ -1,5 +1,6 @@
 "use client";
 
+import type { BookingSettings } from "@/lib/booking";
 import {
   type AdminAppointment,
   breaksFor,
@@ -31,15 +32,17 @@ export default function Timeline({
   blocks,
   now,
   isToday,
+  settings,
 }: {
   date: string;
   appointments: AdminAppointment[];
   blocks: TimeOffBlock[];
   now: string;
   isToday: boolean;
+  settings: BookingSettings;
 }) {
   const { openAppointment, openBlock } = useDayActions();
-  const hours = openingHoursFor(date);
+  const hours = openingHoursFor(date, settings);
 
   if (!hours) {
     return (
@@ -85,7 +88,7 @@ export default function Timeline({
       rail: "var(--muted)",
       onOpen: () => openBlock(block.id),
     })),
-    ...breaksFor(date).map((period) => ({
+    ...breaksFor(date, settings).map((period) => ({
       key: `break-${period.start}`,
       from: toMinutes(period.start),
       to: toMinutes(period.end),

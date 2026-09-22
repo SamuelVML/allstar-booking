@@ -26,7 +26,7 @@ const env = {
 };
 
 let fetchImpl = async () => new Response(null, { status: 200 });
-const module = { exports: {} };
+const sandboxModule = { exports: {} };
 const mocks = {
   "cloudflare:workers": { env },
   "@/lib/booking": {
@@ -37,8 +37,8 @@ const mocks = {
 };
 
 vm.runInNewContext(code, {
-  module,
-  exports: module.exports,
+  module: sandboxModule,
+  exports: sandboxModule.exports,
   require(name) {
     if (mocks[name]) return mocks[name];
     throw new Error(`Unexpected import: ${name}`);
@@ -60,7 +60,7 @@ vm.runInNewContext(code, {
   },
 }, { filename });
 
-const { sendBookingConfirmation } = module.exports;
+const { sendBookingConfirmation } = sandboxModule.exports;
 const booking = {
   appointmentId: "apt-retry-test",
   reference: "AS-RETRY",

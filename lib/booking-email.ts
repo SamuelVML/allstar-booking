@@ -12,6 +12,7 @@ export type BookingConfirmation = {
   endTime: string;
   priceCents: number;
   paymentMethod: "Paid online" | "Pay at the shop";
+  loyaltyRewardPoints?: number;
 };
 
 const RESEND_MAX_ATTEMPTS = 3;
@@ -156,7 +157,7 @@ function bookingConfirmationHtml(businessName: string, booking: BookingConfirmat
 <tr><td style="padding:9px 0;color:#666">Price</td><td style="padding:9px 0;text-align:right">${escapeHtml(formatPrice(booking.priceCents))}</td></tr>
 <tr><td style="padding:9px 0;color:#666">Payment</td><td style="padding:9px 0;text-align:right">${safe.paymentMethod}</td></tr>
 </table>
-<p style="margin:24px 0 0;padding:16px;background:#f5f5f5;border-radius:10px">Complete your visit to earn one loyalty point. Your reward is unlocked at ${LOYALTY_REWARD_POINTS} points.</p>
+<p style="margin:24px 0 0;padding:16px;background:#f5f5f5;border-radius:10px">Complete your visit to earn one loyalty point. Your reward is unlocked at ${booking.loyaltyRewardPoints ?? LOYALTY_REWARD_POINTS} points.</p>
 </div></div></body></html>`;
 }
 
@@ -172,7 +173,7 @@ function bookingConfirmationText(businessName: string, booking: BookingConfirmat
     `Price: ${formatPrice(booking.priceCents)}`,
     `Payment: ${booking.paymentMethod}`,
     "",
-    `Complete your visit to earn one loyalty point. Your reward is unlocked at ${LOYALTY_REWARD_POINTS} points.`,
+    `Complete your visit to earn one loyalty point. Your reward is unlocked at ${booking.loyaltyRewardPoints ?? LOYALTY_REWARD_POINTS} points.`,
   ].join("\n");
 }
 
@@ -190,6 +191,7 @@ export async function sendBookingChangeNotification(
   action: "cancel" | "reschedule",
   changeId: string,
   target?: { date: string; time: string },
+  refundStatus?: "not_needed" | "refunded" | "pending",
 ) {
   const apiKey = env.RESEND_API_KEY?.trim();
   const from = env.BOOKING_EMAIL_FROM?.trim();
@@ -202,7 +204,11 @@ export async function sendBookingChangeNotification(
     `Service: ${booking.service_name}`,
     `Previous appointment: ${booking.appointment_date} ${booking.start_time}–${booking.end_time} (Europe/Amsterdam)`,
     ...(target ? [`New appointment: ${target.date} ${target.time} (Europe/Amsterdam)`, `Service duration: ${booking.duration_minutes} minutes`] : []),
-    ...(action === "cancel" && booking.payment_status === "paid" ? ["Payment was already received. This cancellation does not automatically issue a refund; please contact the shop."] : []),
+    ...(action === "cancel" && refundStatus === "refunded"
+      ? ["Your Stripe payment has been refunded automatically."]
+      : action === "cancel" && refundStatus === "pending"
+        ? ["Your Stripe refund needs attention from the shop. Please contact us if you do not receive it."]
+        : []),
     `Reference: ${booking.reference}`,
   ].join("\n");
   const recipients = [booking.customer_email, env.BOOKING_ADMIN_EMAIL?.trim()].filter((value): value is string => Boolean(value));

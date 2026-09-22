@@ -8,6 +8,7 @@ import {
   getTodayInEindhoven,
 } from "@/lib/booking";
 import { readDay } from "@/lib/backstage-data";
+import { readBookingSettings } from "@/lib/booking-settings";
 import {
   buildAgenda,
   environmentLabel,
@@ -44,7 +45,10 @@ export default async function TodayPage({
   // The barber needs to know at a glance which deployment they are operating.
   const environment = environmentLabel(requestHeaders.get("host") ?? "");
 
-  const { appointments, blocks } = await readDay(date);
+  const [{ appointments, blocks }, { settings }] = await Promise.all([
+    readDay(date),
+    readBookingSettings(),
+  ]);
 
   const live = appointments.filter(isLive);
   const booked = live.reduce((total, row) => total + row.price_cents, 0);
@@ -52,9 +56,9 @@ export default async function TodayPage({
     .filter((row) => row.payment_status === "paid")
     .reduce((total, row) => total + row.price_cents, 0);
 
-  const hours = openingHoursFor(date);
-  const free = openMinutes(date, appointments, blocks);
-  const agenda = buildAgenda(date, appointments, blocks);
+  const hours = openingHoursFor(date, settings);
+  const free = openMinutes(date, appointments, blocks, settings);
+  const agenda = buildAgenda(date, appointments, blocks, settings);
   const next = nextAppointment(appointments, isToday, now);
   const inChair = !!next && isToday && toMinutes(next.start_time) <= toMinutes(now);
 
@@ -81,6 +85,7 @@ export default async function TodayPage({
       now={now}
       appointments={appointments}
       blocks={blocks}
+      settings={settings}
     >
       <header className="bs-head bs-head-dark on-dark">
         <div className="bs-head-row">

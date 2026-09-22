@@ -17,6 +17,7 @@ import { createRoot } from "react-dom/client";
 import DayActionsProvider, { useDayActions } from "@/app/admin/day-actions";
 import SamaritanPanel from "@/app/admin/samaritan-panel";
 import type { AdminAppointment, TimeOffBlock } from "@/lib/backstage-view";
+import { DEFAULT_BOOKING_SETTINGS } from "@/lib/booking";
 import { installFakeApi, type Ranked } from "./fake-api";
 import "@/app/globals.css";
 
@@ -75,6 +76,8 @@ const APPOINTMENTS: AdminAppointment[] = [
     appointment_date: DATE,
     start_time: "11:30",
     end_time: "12:00",
+    duration_minutes: 30,
+    handling_minutes: 10,
     customer_name: "T. van Dijk",
     customer_email: "t.vandijk@example.com",
     customer_phone: "+31 6 1234 0003",
@@ -159,6 +162,7 @@ createRoot(container).render(
         now={NOW}
         appointments={APPOINTMENTS}
         blocks={BLOCKS}
+        settings={DEFAULT_BOOKING_SETTINGS}
       >
         <Controls />
       </DayActionsProvider>

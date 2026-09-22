@@ -8,6 +8,7 @@ import {
   getTodayInEindhoven,
 } from "@/lib/booking";
 import { type DatedTimeOffBlock, readDay, readRange } from "@/lib/backstage-data";
+import { readBookingSettings } from "@/lib/booking-settings";
 import {
   type AdminAppointment,
   isLive,
@@ -46,9 +47,12 @@ export default async function CalendarPage({
 
   // The day is always loaded: the week view still opens appointments through
   // the same sheets, and the provider needs the selected day's rows.
-  const { appointments, blocks } = await readDay(date);
-  const hours = openingHoursFor(date);
-  const free = openMinutes(date, appointments, blocks);
+  const [{ appointments, blocks }, { settings }] = await Promise.all([
+    readDay(date),
+    readBookingSettings(),
+  ]);
+  const hours = openingHoursFor(date, settings);
+  const free = openMinutes(date, appointments, blocks, settings);
 
   // Monday–Saturday; the shop is closed on Sundays.
   const weekDates = Array.from({ length: 6 }, (_, index) => shiftDate(monday, index));
@@ -65,9 +69,9 @@ export default async function CalendarPage({
       (row) => row.appointment_date === value,
     );
     const dayBlocks = week.blocks.filter((row) => row.date === value);
-    const dayHours = openingHoursFor(value);
+    const dayHours = openingHoursFor(value, settings);
     const total = dayHours ? toMinutes(dayHours.end) - toMinutes(dayHours.start) : 0;
-    const openLeft = openMinutes(value, dayAppointments, dayBlocks);
+    const openLeft = openMinutes(value, dayAppointments, dayBlocks, settings);
     const used = total - openLeft;
     const active = dayAppointments.filter((row) => row.status !== "cancelled");
     return {
@@ -93,6 +97,7 @@ export default async function CalendarPage({
       now={now}
       appointments={appointments}
       blocks={blocks}
+      settings={settings}
     >
       <header className="bs-head">
         <div className="bs-head-row">
@@ -152,6 +157,7 @@ export default async function CalendarPage({
               blocks={blocks}
               now={now}
               isToday={date === today}
+              settings={settings}
             />
           </>
         ) : (

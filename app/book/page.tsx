@@ -3,6 +3,7 @@ import { getTodayInEindhoven, SERVICES } from "@/lib/booking";
 import { stripeIsConfigured } from "@/lib/stripe";
 import { isLanguage, type Language } from "@/lib/i18n";
 import BookingForm from "./booking-form";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 export const metadata: Metadata = {
   title: "Book an appointment | All Star Barbershop",
@@ -23,6 +24,7 @@ export default async function BookPage({
       ? params.service
       : SERVICES[0].id;
   const language: Language = isLanguage(params.lang) ? params.lang : "en";
+  const { settings } = await readBookingSettings();
 
   return (
     <main>
@@ -32,6 +34,7 @@ export default async function BookPage({
         initialLanguage={language}
         stripeEnabled={stripeIsConfigured()}
         today={getTodayInEindhoven()}
+        bookingSettings={settings}
       />
     </main>
   );

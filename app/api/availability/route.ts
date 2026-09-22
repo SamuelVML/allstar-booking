@@ -8,6 +8,7 @@ import {
 } from "@/lib/booking";
 import { rankRecommendations } from "@/lib/recommendations";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" };
 
@@ -33,12 +34,13 @@ export async function GET(request: Request) {
 
     const now = new Date();
     const today = getTodayInEindhoven(now);
-    const maximumDate = addDays(today, 60);
+    const database = getD1();
+    const { settings } = await readBookingSettings(database);
+    const maximumDate = addDays(today, settings.bookingWindowDays);
     if (date && (date < today || date > maximumDate)) {
-      return Response.json({ error: "Bookings are available up to 60 days ahead." }, { status: 400, headers: NO_STORE_HEADERS });
+      return Response.json({ error: `Bookings are available up to ${settings.bookingWindowDays} days ahead.` }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
-    const database = getD1();
     await releaseExpiredPaymentReservations(database);
     const rangeStart = date || today;
     const rangeEnd = date || maximumDate;
@@ -56,15 +58,16 @@ export async function GET(request: Request) {
 
     if (!date) {
       const availableDays = [];
-      for (let offset = 0; offset <= 60; offset += 1) {
+      for (let offset = 0; offset <= settings.bookingWindowDays; offset += 1) {
         const candidateDate = addDays(today, offset);
         const times = buildAvailableTimes(
           candidateDate,
           durationMinutes,
           occupied,
-          undefined,
-          60,
+          settings.handlingBufferMinutes,
+          settings.onlineLeadMinutes,
           now,
+          settings,
         );
         if (times.length > 0) availableDays.push({ date: candidateDate, times });
       }
@@ -75,6 +78,7 @@ export async function GET(request: Request) {
         serviceName: service.name,
         limit: 2,
         distinctDates: true,
+        handlingMinutes: settings.handlingBufferMinutes,
       }).map(({ date: recommendationDate, time }) => ({
         date: recommendationDate,
         dateLabel: formatAppointmentDate(recommendationDate),
@@ -91,7 +95,15 @@ export async function GET(request: Request) {
     return Response.json({
       date,
       service: service.id,
-      times: buildAvailableTimes(date, durationMinutes, occupied, undefined, 60, now),
+      times: buildAvailableTimes(
+        date,
+        durationMinutes,
+        occupied,
+        settings.handlingBufferMinutes,
+        settings.onlineLeadMinutes,
+        now,
+        settings,
+      ),
       generatedAt: now.toISOString(),
       validUntil: new Date(now.getTime() + 60_000).toISOString(),
     }, { headers: NO_STORE_HEADERS });
