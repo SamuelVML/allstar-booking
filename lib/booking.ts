@@ -31,7 +31,12 @@ export const OPENING_HOURS: Record<number, { start: string; end: string } | null
 export const HANDLING_BUFFER_MINUTES = 10;
 export const LOYALTY_REWARD_POINTS = 10;
 
-const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
+/**
+ * Exported so Backstage can draw the barber's scheduled breaks in the agenda
+ * and the calendar. Availability still reads it through `overlapsBreak`; the
+ * values and the booking rules they drive are unchanged.
+ */
+export const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
   0: [],
   1: [
     { start: "14:15", end: "14:30" },
@@ -114,22 +119,22 @@ function overlapsBreak(date: string, start: string, durationMinutes: number) {
   ));
 }
 
-export function getTodayInEindhoven() {
+export function getTodayInEindhoven(now = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Europe/Amsterdam",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date());
+  }).format(now);
 }
 
-export function getCurrentTimeInEindhoven() {
+export function getCurrentTimeInEindhoven(now = new Date()) {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Amsterdam",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(new Date());
+  }).format(now);
 }
 
 export function buildAvailableTimes(
@@ -138,13 +143,14 @@ export function buildAvailableTimes(
   occupiedSlots: Set<string>,
   handlingMinutes = HANDLING_BUFFER_MINUTES,
   leadMinutes = 60,
+  now = new Date(),
 ) {
   const hours = getOpeningHours(date);
   if (!hours) return [];
 
   const times: string[] = [];
-  const today = getTodayInEindhoven();
-  const currentTime = getCurrentTimeInEindhoven();
+  const today = getTodayInEindhoven(now);
+  const currentTime = getCurrentTimeInEindhoven(now);
   const earliestToday = addMinutes(currentTime, leadMinutes);
 
   const occupiedMinutes = durationMinutes + handlingMinutes;

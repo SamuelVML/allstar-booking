@@ -58,13 +58,14 @@ function load(relative) {
 
 const bookings = load('app/api/admin/bookings/route.ts');
 const customers = load('app/api/admin/customers/route.ts');
+const recommendations = load('app/api/admin/recommendations/route.ts');
 const issuer = 'https://test-team.cloudflareaccess.com';
 Object.assign(env, { CF_ACCESS_TEAM_DOMAIN: issuer, CF_ACCESS_AUD: 'staff-app', ADMIN_EMAILS: 'barber@example.com' });
 async function request(route, suffix = '', claims = {}) {
   const token = await new jose.SignJWT({ iss: issuer, aud: 'staff-app', sub: 'staff', email: 'barber@example.com', iat: Math.floor(Date.now()/1000), exp: Math.floor(Date.now()/1000)+300, ...claims }).setProtectedHeader({alg:'RS256',kid:'test-key'}).sign(privateKey);
   return route.GET(new Request('https://example.com/api/admin/data'+suffix, {headers:{'cf-access-jwt-assertion':token}}));
 }
-for (const route of [bookings, customers]) {
+for (const route of [bookings, customers, recommendations]) {
   assert.equal((await route.GET(new Request('https://example.com'))).status,403);
   assert.equal((await request(route,'',{aud:'production-app'})).status,403);
   assert.equal((await request(route,'',{email:'outsider@example.com'})).status,403);
@@ -92,5 +93,30 @@ assert.ok(body.services.every(s=>!s.isAddOn));
 assert.equal((await (await request(bookings,'?date=2026-09-21')).json()).bookings.length,0);
 assert.equal((await (await request(customers,'?id=c')).json()).visits.length,1);
 assert.equal((await (await request(customers,'?id=other')).json()).visits.length,0);
+
+// Backstage recommendations: ranked, explained, and never public.
+assert.equal((await request(recommendations,'?service=not-a-service')).status,400);
+assert.equal((await request(recommendations,'?service=colour-add-on')).status,400,'add-ons are not bookable on their own');
+assert.equal((await request(recommendations,'?service=haircut&date=1999-01-01')).status,400,'past dates are refused');
+const ranked = await request(recommendations,'?service=haircut');
+assert.equal(ranked.status,200);
+assert.equal(ranked.headers.get('cache-control'),'private, no-store, max-age=0');
+const rankedBody = await ranked.json();
+assert.ok(rankedBody.recommendations.length<=3,'Backstage is offered at most three times');
+assert.ok(rankedBody.generatedAt&&rankedBody.validUntil,'the freshness window is published');
+for (const item of rankedBody.recommendations) {
+  assert.deepEqual(Object.keys(item).sort(),['date','reason','score','time']);
+  assert.equal(typeof item.score,'number');
+  assert.ok(item.reason.length>20,'staff get a sentence they can act on, not a label');
+}
+for (let index=1;index<rankedBody.recommendations.length;index+=1) {
+  assert.ok(rankedBody.recommendations[index-1].score>=rankedBody.recommendations[index].score,'ranked highest first');
+}
+const scoped = await request(recommendations,'?service=haircut&date=2026-09-22');
+assert.equal(scoped.status,200);
+const scopedBody = await scoped.json();
+assert.equal(scopedBody.date,'2026-09-22');
+assert.ok(scopedBody.recommendations.every(item=>item.date==='2026-09-22'),'a date scopes the ranking to that day');
+
 db.close();
-console.log('PASS: native API rejects missing/wrong audience/outsider tokens before DB access; date filtering, literal search, customer history, no-store and minimal fields');
+console.log('PASS: native API rejects missing/wrong audience/outsider tokens before DB access; date filtering, literal search, customer history, ranked Backstage recommendations, no-store and minimal fields');
