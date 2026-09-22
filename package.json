@@ -16,9 +16,10 @@
     "db:generate": "drizzle-kit generate",
     "test:booking-management": "node tests/booking-management.mjs",
     "test:backstage": "node tests/backstage.mjs",
-    "test": "npm run test:booking-management && node tests/native-api.mjs && npm run test:backstage && npm run test:backstage-render",
+    "test": "npm run test:booking-management && node tests/native-api.mjs && npm run test:backstage && npm run test:backstage-render && npm run test:launch-list",
     "test:backstage-render": "node tests/backstage-render.mjs",
-    "test:ui": "node tests/ui/run.mjs"
+    "test:ui": "node tests/ui/run.mjs",
+    "test:launch-list": "node tests/launch-list.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

@@ -1,15 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
+import LaunchListForm from "./launch-list-form";
 import { formatPrice, OPENING_HOURS, SERVICES } from "@/lib/booking";
 import { COPY, type Language, serviceLabel } from "@/lib/i18n";
 import { ArrowRight, StarMark } from "@/lib/icons";
 
 const ADDRESS_QUERY = "Bakkerstraat+48+5612+EP+Eindhoven";
 const PHONE = "+31686357350";
-const WHATSAPP_LAUNCH_URL =
-  "https://wa.me/31686357350?text=Hi%20All%20Star%2C%20I%27m%20interested%20in%20the%20Mobile%20Barber.";
 
 /** Monday-first, matching how the shop reads its own week. */
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
@@ -85,7 +83,7 @@ export default function SiteHome({
         </div>
         <div>
           {bookable.map((service, index) => (
-            <Link
+            <a
               key={service.id}
               href={bookHref(service.id)}
               className="service-row"
@@ -98,7 +96,7 @@ export default function SiteHome({
                 <small>{service.durationMinutes} min</small>
               </span>
               <b>{formatPrice(service.priceCents)}</b>
-            </Link>
+            </a>
           ))}
         </div>
         <p className="muted" style={{ margin: "14px 0 0", fontSize: 13 }}>
@@ -147,10 +145,7 @@ export default function SiteHome({
                 <span key={mode}>{mode}</span>
               ))}
             </div>
-            <a className="btn btn-outline" href={WHATSAPP_LAUNCH_URL}>
-              {t.mobileCta}
-              <ArrowRight />
-            </a>
+            <LaunchListForm language={language} />
           </div>
         </div>
       </section>
@@ -179,12 +174,7 @@ export default function SiteHome({
                 <span key={programme}>{programme}</span>
               ))}
             </div>
-            <a
-              className="btn btn-outline"
-              href="https://all-star-barbershop.com/academy/"
-              target="_blank"
-              rel="noreferrer"
-            >
+            <a className="btn btn-outline" href={language === "nl" ? "/academy?lang=nl" : "/academy"}>
               {t.academyCta}
               <ArrowRight />
             </a>
@@ -245,10 +235,10 @@ export default function SiteHome({
       </footer>
 
       <div className="sticky-bar">
-        <Link className="btn btn-primary btn-block" href={bookHref()}>
+        <a className="btn btn-primary btn-block" href={bookHref()}>
           {t.bookCta}
           <ArrowRight />
-        </Link>
+        </a>
       </div>
     </div>
   );
