@@ -75,6 +75,16 @@ const mocks = {
 
 /* ------------------------------------------- canonical Backstage entrypoint */
 
+const entryRedirects = await load('next.config.ts').default.redirects();
+for (const source of ['/admin', '/admin/']) {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(entryRedirects.find(rule => rule.source === source))),
+    { source, destination: '/admin/bookings', permanent: false },
+    `${source} redirects before the protected layout runs`,
+  );
+}
+assert.equal(entryRedirects.length, 2, 'no redirects bypass other staff routes');
+
 assert.throws(
   () => load('app/admin/page.tsx').default(),
   error => error?.location === '/admin/bookings',
