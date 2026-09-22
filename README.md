@@ -70,6 +70,22 @@ Use one Access application/audience for both paths so dashboard requests can
 reach the protected APIs. Each business deployment configures its own identity
 settings. Native app authentication is not implemented yet.
 
+Backstage has five sections, all under `/admin/*` and all behind the same
+Access application:
+
+- `/admin/bookings` — **Today**: a chronological agenda with the open stretches
+  between bookings called out, a "next up" block, and a strip showing booked
+  value, recorded payments and remaining open time.
+- `/admin/calendar` — day timeline and week capacity view (`?view=day|week`).
+- `/admin/customers` — search by name, email or phone; customer detail with
+  loyalty points, completed visits, notes and booking history.
+- `/admin/revenue` — day, week or month (`?period=day|week|month`).
+- `/admin/settings` — environment, signed-in staff member, opening hours and
+  the booking rules, all read-only.
+
+Each page verifies the staff token itself rather than relying on the shared
+layout, so no screen depends on hidden UI for its authorisation.
+
 The dashboard filters bookings by day and supports cancellation, rescheduling,
 and visit completion. Saved service duration and handling buffer determine slot
 availability. Revision checks reject stale edits; slot reservations, booking
@@ -82,10 +98,44 @@ Set `BOOKING_ADMIN_EMAIL` for admin notifications. If delivery fails, the bookin
 change stays saved and the dashboard asks staff to contact the customer. There
 is no automatic email retry queue yet.
 
-Run `npm run test:booking-management` with Node 22.13+ to check migrations,
-signed-token authorization, protected routes, stale edits, slot races, handling
-buffers, loyalty points and payment webhook replay safeguards. These tests use
-an in-memory database and local signing keys; no customer emails are sent.
+Run `npm test` with Node 22.13+ to run every suite, or the individual scripts:
+
+- `npm run test:booking-management` — migrations, signed-token authorization,
+  protected routes, stale edits, slot races, handling buffers, loyalty points
+  and payment webhook replay safeguards.
+- `node tests/native-api.mjs` — the read endpoints the native Backstage client
+  uses.
+- `npm run test:backstage` — payment-state semantics, the agenda/open-time day
+  model, walk-in slot rules, "who is next", the booked-value versus
+  recorded-payments split behind Revenue, and the availability recommendation
+  `reason`.
+- `npm run test:backstage-render` — renders each Backstage screen to HTML and
+  asserts it refuses an unauthenticated visitor. Run `npm run build` first; set
+  `BACKSTAGE_HTML_OUT=<dir>` to write the renders out for visual review.
+
+`npm test` stays browser-free and fast. The interactive Backstage sheets are
+covered separately by `npm run test:ui`, which needs Chromium:
+
+```sh
+npx playwright install chromium   # once
+npm run test:ui
+```
+
+It starts a Vite dev server over `tests/ui/harness.tsx`, which mounts the real
+`DayActionsProvider` with `next/navigation`, `next/link` and `fetch` stubbed,
+and drives the add walk-in and reschedule flows with Playwright — the parts
+that Cloudflare Access otherwise puts out of reach locally. It covers the
+recommendation panel's endpoint and cadence, off-grid picks landing in the time
+grid, mutation payloads including the `revision` check, and that destructive and
+financial actions send nothing until confirmed.
+
+A green run is not a deployed check: it cannot cover Cloudflare Access itself,
+real D1 data, the same-origin and content-type check in
+`authoriseStaffMutation`, or email delivery. Set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to reuse a Chromium you already have.
+
+All of these use an in-memory database and local signing keys; no customer
+emails are sent and nothing touches a deployed environment.
 
 ## Local D1 migrations
 
@@ -145,3 +195,5 @@ Time-off blocks are stored separately from appointments. Database triggers rejec
 Payment recording is for money already received at the shop. It records the full booking amount once, with staff identity, method and timestamp. It does not charge a card or issue a refund. Stripe bookings cannot be manually marked paid. Completion and payment are independent actions.
 
 The date view shows booked value for confirmed/completed visits and recorded payments against appointments on that date (including paid cancellations). These are appointment-date totals, not daily cash receipts, profit, or refund-adjusted revenue. Partial payments/refunds and walk-in customer-account linking are not included in this version.
+
+Revenue applies the same rule over a day, week or month: `recordedCents` counts only appointments whose `payment_status` is `paid`, `bookedCents` counts confirmed and completed visits, and the two are always labelled distinctly. `GET /api/admin/revenue?period=day|week|month&date=YYYY-MM-DD` returns that summary for the native client; it is a new read-only endpoint and no existing endpoint's request or response shape changed.

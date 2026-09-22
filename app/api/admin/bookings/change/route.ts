@@ -3,6 +3,8 @@ import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
 import { BookingConflict, changeBooking, type ManagedBooking } from "@/lib/booking-management";
 import { sendBookingChangeNotification } from "@/lib/booking-email";
+import { readBookingSettings } from "@/lib/booking-settings";
+import { refundCancelledBooking } from "@/lib/refunds";
 
 export async function POST(request: Request) {
   const user = await authoriseStaffMutation(request);
@@ -19,16 +21,31 @@ export async function POST(request: Request) {
   if (payload.action === "reschedule" && (!payload.date || !payload.time)) return Response.json({ error: "Choose a date and time." }, { status: 400 });
   try {
     const database = getD1();
+    const stored = await readBookingSettings(database);
     const booking = await database.prepare("SELECT * FROM appointments WHERE reference = ?").bind(payload.reference).first<ManagedBooking>();
     if (!booking) return Response.json({ error: "Booking not found." }, { status: 404 });
     if (booking.revision !== payload.revision) throw new BookingConflict("The booking changed. Refresh and try again.");
     const target = payload.action === "reschedule" ? { date: payload.date!, time: payload.time! } : undefined;
-    const change = await changeBooking(database, booking, payload.action, user.id, target);
+    const change = await changeBooking(database, booking, payload.action, user.id, target, stored);
+    const refundStatus = payload.action === "cancel"
+      ? await refundCancelledBooking(database, booking, user.id)
+      : "not_needed";
     let notificationsSent = true;
     if (payload.action !== "complete" && booking.customer_email) {
-      notificationsSent = await sendBookingChangeNotification(booking, payload.action, change.changeId, target);
+      notificationsSent = await sendBookingChangeNotification(
+        booking,
+        payload.action,
+        change.changeId,
+        target,
+        refundStatus,
+      );
     }
-    return Response.json({ changed: true, revision: change.revision, notificationsSent });
+    return Response.json({
+      changed: true,
+      revision: change.revision + (refundStatus === "refunded" ? 1 : 0),
+      notificationsSent,
+      refundStatus,
+    });
   } catch (error) {
     if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
     console.error("Staff booking change failed");

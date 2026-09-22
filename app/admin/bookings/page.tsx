@@ -1,93 +1,179 @@
 import { headers } from "next/headers";
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getD1 } from "@/db";
 import { getStaffUser } from "@/lib/staff-auth";
-import { dateIsValid, getTodayInEindhoven, formatPrice } from "@/lib/booking";
-import BookingActions from "./booking-actions";
-import Operations, { RecordPayment } from "./operations";
+import {
+  dateIsValid,
+  formatPrice,
+  getCurrentTimeInEindhoven,
+  getTodayInEindhoven,
+} from "@/lib/booking";
+import { readDay } from "@/lib/backstage-data";
+import { readBookingSettings } from "@/lib/booking-settings";
+import {
+  buildAgenda,
+  environmentLabel,
+  isLive,
+  nextAppointment,
+  openingHoursFor,
+  openLabel,
+  openMinutes,
+  shiftDate,
+  toMinutes,
+} from "@/lib/backstage-view";
+import { ChevronLeft, ChevronRight, StarMark } from "@/lib/icons";
+import DayActionsProvider from "../day-actions";
+import { AddButton, AddInlineButton, Agenda, NextUp } from "../agenda";
 
 export const dynamic = "force-dynamic";
 
-type BookingRow = {
-  reference: string;
-  source: string;
-  customer_account_id: string | null;
-  revision: number;
-  service_name: string;
-  price_cents: number;
-  appointment_date: string;
-  start_time: string;
-  end_time: string;
-  customer_name: string;
-  customer_email: string;
-  customer_phone: string;
-  notes: string;
-  status: string;
-  payment_method: string;
-  payment_status: string;
-};
+export default async function TodayPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ date?: string }>;
+}) {
+  // Checked here as well as in the layout: no screen leans on the shell for
+  // its authorisation.
+  const requestHeaders = await headers();
+  if (!(await getStaffUser(requestHeaders))) notFound();
 
-export default async function BookingAdminPage({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
-  const user = await getStaffUser(await headers());
-  if (!user) notFound();
   const params = await searchParams;
-  const date = params.date && dateIsValid(params.date) ? params.date : getTodayInEindhoven();
+  const today = getTodayInEindhoven();
+  const date = params.date && dateIsValid(params.date) ? params.date : today;
+  const now = getCurrentTimeInEindhoven();
+  const isToday = date === today;
 
-  const rows = await getD1()
-    .prepare(
-      `SELECT reference, revision, source, customer_account_id, service_name, price_cents, appointment_date, start_time,
-        end_time, customer_name, customer_email, customer_phone, notes, status,
-        payment_method, payment_status
-       FROM appointments
-       WHERE appointment_date = ?
-       ORDER BY start_time ASC
-`,
-    )
-    .bind(date)
-    .all<BookingRow>();
+  // The barber needs to know at a glance which deployment they are operating.
+  const environment = environmentLabel(requestHeaders.get("host") ?? "");
 
-  const blocks = await getD1().prepare("SELECT id, start_time, end_time, reason FROM time_off WHERE date = ? AND removed_at IS NULL ORDER BY start_time")
-    .bind(date).all<{ id: string; start_time: string; end_time: string; reason: string }>();
-  const booked = rows.results.filter(row => ["confirmed", "completed"].includes(row.status)).reduce((sum, row) => sum + row.price_cents, 0);
-  const paid = rows.results.filter(row => row.payment_status === "paid").reduce((sum, row) => sum + row.price_cents, 0);
+  const [{ appointments, blocks }, { settings }] = await Promise.all([
+    readDay(date),
+    readBookingSettings(),
+  ]);
+
+  const live = appointments.filter(isLive);
+  const booked = live.reduce((total, row) => total + row.price_cents, 0);
+  const recorded = appointments
+    .filter((row) => row.payment_status === "paid")
+    .reduce((total, row) => total + row.price_cents, 0);
+
+  const hours = openingHoursFor(date, settings);
+  const free = openMinutes(date, appointments, blocks, settings);
+  const agenda = buildAgenda(date, appointments, blocks, settings);
+  const next = nextAppointment(appointments, isToday, now);
+  const inChair = !!next && isToday && toMinutes(next.start_time) <= toMinutes(now);
+
+  const dayTitle = isToday
+    ? "Today"
+    : new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long" }).format(
+        new Date(`${date}T12:00:00Z`),
+      );
+  const daySubtitle =
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "UTC",
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    }).format(new Date(`${date}T12:00:00Z`)) +
+    (hours ? ` · Open ${hours.start}–${hours.end}` : " · Closed");
+
+  const empty = appointments.length === 0 && blocks.length === 0;
+
   return (
-    <main className="admin-page">
-      <header>
-        <div><span className="booking-kicker">Backstage</span><h1>Bookings</h1></div>
-        <Link className="button button-outline" href="/">Back to website</Link>
+    <DayActionsProvider
+      date={date}
+      today={today}
+      now={now}
+      appointments={appointments}
+      blocks={blocks}
+      settings={settings}
+    >
+      <header className="bs-head bs-head-dark on-dark">
+        <div className="bs-head-row">
+          <span className="bs-env">
+            <StarMark />
+            <span>Backstage · {environment}</span>
+          </span>
+          <AddButton />
+        </div>
+
+        <div className="day-nav">
+          <div>
+            <h1 className="display">{dayTitle}</h1>
+            <p>{daySubtitle}</p>
+          </div>
+          <div className="day-nav-buttons">
+            <a
+              className="btn-icon"
+              aria-label="Previous day"
+              href={`/admin/bookings?date=${shiftDate(date, -1)}`}
+            >
+              <ChevronLeft />
+            </a>
+            <a
+              className="btn-icon"
+              aria-label="Next day"
+              href={`/admin/bookings?date=${shiftDate(date, 1)}`}
+            >
+              <ChevronRight />
+            </a>
+          </div>
+        </div>
+
+        <dl className="kpis">
+          <div>
+            <dt>Booked value</dt>
+            <dd className="value">{formatPrice(booked)}</dd>
+            <dd className="sub">{live.length} confirmed / done</dd>
+          </div>
+          <div>
+            <dt>Recorded</dt>
+            <dd className="value">{formatPrice(recorded)}</dd>
+            <dd className="sub">actually received</dd>
+          </div>
+          <div>
+            <dt>Open time</dt>
+            <dd className="value">{openLabel(free)}</dd>
+            <dd className="sub">
+              {blocks.length
+                ? `${blocks.length} block${blocks.length > 1 ? "s" : ""}`
+                : "no time off"}
+            </dd>
+          </div>
+        </dl>
       </header>
-      <form className="admin-date-filter" method="get">
-        <label>Appointments on <input type="date" name="date" defaultValue={date} required /></label>
-        <button className="button button-outline" type="submit">Show bookings</button>
-        <Link href="/admin/bookings">Today</Link>
-      </form>
-      <p>Times are local to the shop (Europe/Amsterdam). Completing a visit awards a point; it does not record payment.</p>
-      <div className="backstage-totals">
-        <div><span>Booked value</span><strong>{formatPrice(booked)}</strong><small>Confirmed and completed visits on {date}</small></div>
-        <div><span>Recorded payments</span><strong>{formatPrice(paid)}</strong><small>Payments against appointments on {date}, including paid cancellations. Not daily takings or profit.</small></div>
+
+      {/* On a phone this reads top to bottom: who is next, then the day.
+          From 1024px the agenda takes the main column and the summary moves
+          into a sidebar beside it. */}
+      <div className="today-columns">
+        {next && (
+          <div className="today-next">
+            <NextUp appointment={next} inChair={inChair} />
+          </div>
+        )}
+
+        <div className="today-agenda">
+          {empty ? (
+            <div className="empty-state" style={{ margin: "40px var(--gutter)" }}>
+              <strong>{hours ? "Nothing booked" : "Closed"}</strong>
+              <p>
+                {hours
+                  ? "The whole day is open for online bookings."
+                  : "No opening hours on this day."}
+              </p>
+              <AddInlineButton label="Add walk-in or time off" />
+            </div>
+          ) : (
+            <Agenda entries={agenda} nextReference={next?.reference ?? null} />
+          )}
+        </div>
+
+        <p className="today-note muted pretty">
+          Booked value is what is on the books for this date. Recorded payments are what has
+          actually been received against appointments on this date, including paid
+          cancellations — not daily takings or profit.
+        </p>
       </div>
-      <Operations date={date} blocks={blocks.results} />
-      <div className="admin-table-wrap">
-        <table>
-          <thead><tr><th>Date</th><th>Customer</th><th>Service</th><th>Contact</th><th>Total</th><th>Payment</th><th>Status</th><th>Manage</th></tr></thead>
-          <tbody>
-            {rows.results.map((booking) => (
-              <tr key={booking.reference}>
-                <td><strong>{booking.appointment_date}</strong><br />{booking.start_time}–{booking.end_time}<br /><small>{booking.reference}</small></td>
-                <td><strong>{booking.customer_name}</strong>{booking.notes && <><br /><small>{booking.notes}</small></>}</td>
-                <td>{booking.service_name}{booking.source === "walk_in" && <><br /><small>Walk-in</small></>}</td>
-                <td><a href={`tel:${booking.customer_phone}`}>{booking.customer_phone}</a><br /><a href={`mailto:${booking.customer_email}`}>{booking.customer_email}</a></td>
-                <td>{formatPrice(booking.price_cents)}</td>
-                <td><strong>{booking.payment_status.replaceAll("_", " ")}</strong><br /><small>{booking.payment_method === "stripe" ? "Stripe" : booking.payment_method === "card" ? "Card at shop" : booking.payment_status === "paid" ? "Cash" : "Pay at shop"}</small></td>
-                <td><span className={`status status-${booking.status}`}>{booking.status}</span></td>
-                <td>{booking.status === "confirmed" ? <BookingActions reference={booking.reference} revision={booking.revision} date={booking.appointment_date} paid={booking.payment_status === "paid"} loyalty={!!booking.customer_account_id} /> : booking.status === "completed" ? (booking.customer_account_id ? "Visit completed · Point awarded" : "Visit completed") : "—"}{["confirmed", "completed"].includes(booking.status) && booking.payment_status === "due_at_shop" && booking.payment_method !== "stripe" && <RecordPayment reference={booking.reference} revision={booking.revision} amount={booking.price_cents} />}</td>
-              </tr>
-            ))}
-            {rows.results.length === 0 && <tr><td colSpan={8}>No bookings yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </main>
+    </DayActionsProvider>
   );
 }

@@ -127,3 +127,31 @@ export const paymentReceipts = sqliteTable("payment_receipts", {
   actorId: text("actor_id").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const bookingSettings = sqliteTable("booking_settings", {
+  id: integer("id").primaryKey(),
+  configJson: text("config_json").notNull(),
+  revision: integer("revision").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedBy: text("updated_by").notNull(),
+});
+
+export const paymentRefunds = sqliteTable(
+  "payment_refunds",
+  {
+    id: text("id").primaryKey(),
+    appointmentId: text("appointment_id")
+      .notNull()
+      .references(() => appointments.id),
+    stripeRefundId: text("stripe_refund_id"),
+    amountCents: integer("amount_cents").notNull(),
+    status: text("status").notNull().default("pending"),
+    error: text("error"),
+    requestedBy: text("requested_by").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("payment_refunds_appointment_id_unique").on(table.appointmentId),
+  ],
+);

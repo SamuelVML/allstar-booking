@@ -15,6 +15,25 @@ const db = new DatabaseSync(':memory:');
 db.exec('PRAGMA foreign_keys=ON');
 for (const name of fs.readdirSync('drizzle').filter(name => name.endsWith('.sql')).sort()) db.exec(fs.readFileSync(`drizzle/${name}`, 'utf8'));
 let databaseReads = 0;
+let stripeRefundCalls = 0;
+let stripeRefundFailures = 0;
+const stripeMock = {
+  getStripeClient() {
+    return {
+      checkout: { sessions: { retrieve: async () => ({ payment_intent: 'pi_test' }) } },
+      refunds: {
+        create: async () => {
+          stripeRefundCalls += 1;
+          if (stripeRefundFailures > 0) {
+            stripeRefundFailures -= 1;
+            throw new Error('Temporary Stripe failure');
+          }
+          return { id: 're_test' };
+        },
+      },
+    };
+  },
+};
 const database = {
   prepare(sql) {
     let args = [];
@@ -39,31 +58,35 @@ const mockedJose = { ...jose, createRemoteJWKSet(url, options) {
 function load(relative) {
   const filename = path.resolve(root, relative);
   if (modules.has(filename)) return modules.get(filename).exports;
-  const module = { exports: {} }; modules.set(filename, module);
+  const loadedModule = { exports: {} }; modules.set(filename, loadedModule);
   const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(code, {
-    module, exports: module.exports, console, crypto, URL, Request, Response, Headers, Date, Error,
+    module: loadedModule, exports: loadedModule.exports, console, crypto, URL, Request, Response, Headers, Date, Error,
     fetch: async () => { throw new Error('No external requests in tests'); },
     require(name) {
       if (name === 'cloudflare:workers') return { env };
       if (name === 'jose') return mockedJose;
+      if (name === '@/lib/stripe') return stripeMock;
       if (name === '@/db') return { getD1() { databaseReads++; return database; } };
       if (name.startsWith('@/')) return load(`${name.slice(2)}.ts`);
       if (name.startsWith('.')) return load(path.relative(root, path.resolve(path.dirname(filename), `${name}.ts`)));
       return require(name);
     },
   }, { filename });
-  return module.exports;
+  return loadedModule.exports;
 }
 const auth = load('lib/staff-auth.ts');
 const management = load('lib/booking-management.ts');
 const bookingHelpers = load('lib/booking.ts');
+const recommendationEngine = load('lib/recommendations.ts');
 const changes = load('app/api/admin/bookings/change/route.ts');
 const complete = load('app/api/admin/bookings/complete/route.ts');
 const availability = load('app/api/admin/bookings/availability/route.ts');
 const payments = load('lib/payments.ts');
 const backstage = load('lib/backstage.ts');
 const operations = load('app/api/admin/operations/route.ts');
+const settingsStore = load('lib/booking-settings.ts');
+const settingsRoute = load('app/api/admin/settings/route.ts');
 const issuer = 'https://test-team.cloudflareaccess.com';
 Object.assign(env, { CF_ACCESS_TEAM_DOMAIN: issuer, CF_ACCESS_AUD: 'staff-app', ADMIN_EMAILS: 'barber@example.com' });
 async function token(overrides = {}, signingKey = privateKey) {
@@ -82,7 +105,7 @@ assert.equal(await auth.getStaffUser(tokenHeaders(await token({}, wrongKey.priva
 env.CF_ACCESS_AUD = ''; assert.equal(await auth.getStaffUser(tokenHeaders(validToken)), null); env.CF_ACCESS_AUD = 'staff-app';
 const headers = { 'cf-access-jwt-assertion': validToken, 'content-type': 'application/json', origin: 'https://booking.example.com' };
 assert.equal(await auth.authoriseStaffMutation(new Request('https://booking.example.com/api/admin/bookings/change', { method: 'POST', headers: { ...headers, origin: 'https://evil.example.com' } })), null);
-for (const handler of [changes.POST, complete.POST, operations.POST]) {
+for (const handler of [changes.POST, complete.POST, operations.POST, settingsRoute.PUT]) {
   const response = await handler(new Request('https://booking.example.com/api/admin/bookings/change', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-access-authenticated-user-email': 'barber@example.com' }, body: JSON.stringify({ reference: 'TEST', revision: 0 }) }));
   assert.equal(response.status, 403);
 }
@@ -129,6 +152,35 @@ await management.changeBooking(database,finish,'complete','staff-id');
 await assert.rejects(management.changeBooking(database,finish,'complete','staff-id'),/booking changed/);
 assert.equal(db.prepare("SELECT loyalty_points FROM customer_accounts WHERE id='customer'").get().loyalty_points,1);
 await payments.expirePaymentAppointment(database,'finish','session-finish');assert.equal(slots('finish').length,8);
+const refundable = seed('refundable','16:00','confirmed',true);
+const refundResponse = await changes.POST(new Request('https://booking.example.com/api/admin/bookings/change', {
+  method: 'POST', headers, body: JSON.stringify({ reference: refundable.reference, revision: 0, action: 'cancel' }),
+}));
+assert.equal(refundResponse.status, 200);
+assert.equal(row('refundable').status, 'cancelled');
+assert.equal(row('refundable').payment_status, 'refunded');
+assert.equal(stripeRefundCalls, 1);
+assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='refundable'").get().status, 'succeeded');
+
+const retryable = seed('retryable','17:00','confirmed',true);
+stripeRefundFailures = 1;
+const failedRefundResponse = await changes.POST(new Request('https://booking.example.com/api/admin/bookings/change', {
+  method: 'POST', headers, body: JSON.stringify({ reference: retryable.reference, revision: 0, action: 'cancel' }),
+}));
+assert.equal(failedRefundResponse.status, 200);
+assert.equal((await failedRefundResponse.json()).refundStatus, 'pending');
+assert.equal(row('retryable').status, 'cancelled');
+assert.equal(row('retryable').payment_status, 'paid');
+assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='retryable'").get().status, 'failed');
+const retriedRefundResponse = await operations.POST(new Request('https://booking.example.com/api/admin/operations', {
+  method: 'POST', headers, body: JSON.stringify({
+    action: 'retry_refund', id: crypto.randomUUID(), reference: retryable.reference, revision: row('retryable').revision,
+  }),
+}));
+assert.equal(retriedRefundResponse.status, 200);
+assert.equal((await retriedRefundResponse.json()).refundStatus, 'refunded');
+assert.equal(row('retryable').payment_status, 'refunded');
+assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='retryable'").get().status, 'succeeded');
 console.log('PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety');
 
 const blockId = crypto.randomUUID();
@@ -174,7 +226,83 @@ const blockedMove = {...database, async batch(statements) {
 }};
 await assert.rejects(management.changeBooking(blockedMove,row('occupied'),'reschedule','staff-id',{date,time:'17:20'}),/slot changed/);
 assert.equal(row('occupied').start_time,'13:00'); assert.equal(slots('occupied').length,8);
+const vacationCollision = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({
+  action:'block_range',id:crypto.randomUUID(),fromDate:date,toDate:date,reason:'Collision test',cancelConflicts:true,
+})}));
+assert.equal(vacationCollision.status,409);
+assert.equal(row('occupied').status,'confirmed','a failed vacation preflight must not cancel bookings');
 const bad = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({action:'payment',id:crypto.randomUUID(),reference:'occupied',revision:0,method:'wire'})}));
 assert.equal(bad.status,400);
 console.log('PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations');
+
+const defaults = await settingsStore.readBookingSettings(database);
+assert.equal(defaults.revision, 0);
+const changedSettings = {
+  ...defaults.settings,
+  onlineLeadMinutes: 90,
+  bookingWindowDays: 75,
+  openingHours: { ...defaults.settings.openingHours, 1: { start: '11:00', end: '17:00' } },
+  dailyBreaks: { ...defaults.settings.dailyBreaks, 1: [{ start: '13:00', end: '13:30' }] },
+};
+assert.equal(await settingsStore.saveBookingSettings(changedSettings, 0, 'staff-id', database), 1);
+const persisted = await settingsStore.readBookingSettings(database);
+assert.equal(persisted.settings.onlineLeadMinutes, 90);
+assert.deepEqual(JSON.parse(JSON.stringify(persisted.settings.openingHours[1])), { start: '11:00', end: '17:00' });
+await assert.rejects(
+  settingsStore.saveBookingSettings(changedSettings, 0, 'stale-editor', database),
+  /another session/,
+);
+
+const vacationDate = new Date(`${date}T12:00:00Z`);
+vacationDate.setUTCDate(vacationDate.getUTCDate() + 7);
+const vacation = vacationDate.toISOString().slice(0, 10);
+await backstage.blockFullDays(
+  database,
+  { fromDate: vacation, toDate: vacation, reason: 'Vacation' },
+  'staff-id',
+  persisted,
+);
+assert.equal(
+  db.prepare("SELECT count(*) AS n FROM time_off WHERE date=? AND reason='Vacation'").get(vacation).n,
+  1,
+);
+console.log('PASS: editable settings persist with revision checks and full-day time off uses configured hours');
+
+const fixedRecommendationNow = new Date('2026-09-22T11:42:00Z'); // 13:42 in Eindhoven.
+const immediateTimes = bookingHelpers.buildAvailableTimes('2026-09-22',30,new Set(),10,0,fixedRecommendationNow);
+assert.equal(immediateTimes.includes('13:40'),false,'Backstage must never recommend a past time');
+assert.equal(immediateTimes.includes('13:45'),true,'Backstage may recommend the next five-minute opening');
+const customerTimes = bookingHelpers.buildAvailableTimes('2026-09-22',30,new Set(),10,60,fixedRecommendationNow);
+assert.equal(customerTimes.includes('14:40'),false,'Customer recommendations keep the sixty-minute lead time');
+assert.equal(customerTimes.includes('14:45'),true);
+const recommendationDate = '2026-09-23';
+const recommendationOccupied = new Set([
+  `${recommendationDate}T13:35`,
+  `${recommendationDate}T14:20`,
+]);
+const rankedRecommendations = recommendationEngine.rankRecommendations({
+  availableDays: [{date:recommendationDate,times:['10:00','13:40','15:00']}],
+  occupiedSlots: recommendationOccupied,
+  durationMinutes: 30,
+  serviceName: 'Haircut',
+  limit: 3,
+  distinctDates: false,
+});
+assert.equal(rankedRecommendations[0].time,'13:40');
+assert.match(rankedRecommendations[0].reason,/between two appointments/);
+const multiDayRecommendations = recommendationEngine.rankRecommendations({
+  availableDays: [
+    {date:'2026-09-23',times:['10:00','11:00']},
+    {date:'2026-09-24',times:['10:00']},
+    {date:'2026-09-25',times:['10:00']},
+  ],
+  occupiedSlots: new Set(),
+  durationMinutes: 30,
+  serviceName: 'Haircut',
+  limit: 2,
+  distinctDates: true,
+});
+assert.deepEqual(Array.from(multiDayRecommendations, item => item.date),['2026-09-23','2026-09-24']);
+console.log('PASS: real-time cutoffs, compact-gap ranking and distinct-day customer recommendations');
+
 db.close();

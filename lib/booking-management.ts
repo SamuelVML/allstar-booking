@@ -1,4 +1,8 @@
 import { addMinutes, buildAvailableTimes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
+import {
+  readBookingSettings,
+  type StoredBookingSettings,
+} from "@/lib/booking-settings";
 
 export type ManagedBooking = {
   id: string; reference: string; revision: number; status: string;
@@ -6,28 +10,44 @@ export type ManagedBooking = {
   duration_minutes: number; handling_minutes: number;
   customer_account_id: string | null; customer_name: string; customer_email: string;
   service_name: string; price_cents: number; payment_status: string;
+  payment_method: string; stripe_checkout_session_id: string | null;
 };
 
 export class BookingConflict extends Error {}
 
-export function validManagementDate(date: string) {
+export function validManagementDate(date: string, bookingWindowDays = 60) {
   const today = getTodayInEindhoven();
   const maximum = new Date(`${today}T12:00:00Z`);
-  maximum.setUTCDate(maximum.getUTCDate() + 60);
+  maximum.setUTCDate(maximum.getUTCDate() + bookingWindowDays);
   return dateIsValid(date) && date >= today && date <= maximum.toISOString().slice(0, 10);
 }
 
-export async function availableForBooking(database: D1Database, booking: ManagedBooking, date: string) {
+export async function availableForBooking(
+  database: D1Database,
+  booking: ManagedBooking,
+  date: string,
+  stored?: StoredBookingSettings,
+) {
+  const { settings } = stored ?? await readBookingSettings(database);
   const rows = await database.prepare(
     "SELECT slot_start FROM (SELECT slot_start, appointment_id FROM appointment_slots UNION ALL SELECT slot_start, NULL AS appointment_id FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ? AND (appointment_id IS NULL OR appointment_id != ?)",
   ).bind(`${date}T00:00`, `${date}T23:59`, booking.id).all<{ slot_start: string }>();
-  return buildAvailableTimes(date, booking.duration_minutes, new Set(rows.results.map((row) => row.slot_start)), booking.handling_minutes);
+  return buildAvailableTimes(
+    date,
+    booking.duration_minutes,
+    new Set(rows.results.map((row) => row.slot_start)),
+    booking.handling_minutes,
+    0,
+    new Date(),
+    settings,
+  );
 }
 
-export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }) {
+export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }, stored?: StoredBookingSettings) {
+  const currentSettings = stored ?? await readBookingSettings(database);
   if (booking.status !== "confirmed") throw new BookingConflict("Only confirmed bookings can be changed.");
   if (action === "reschedule") {
-    if (!target || !validManagementDate(target.date) || !(await availableForBooking(database, booking, target.date)).includes(target.time)) {
+    if (!target || !validManagementDate(target.date, currentSettings.settings.bookingWindowDays) || !(await availableForBooking(database, booking, target.date, currentSettings)).includes(target.time)) {
       throw new BookingConflict("That time is unavailable. Choose another slot.");
     }
     if (target.date === booking.appointment_date && target.time === booking.start_time) throw new BookingConflict("Choose a different appointment time.");
@@ -60,7 +80,9 @@ export async function changeBooking(database: D1Database, booking: ManagedBookin
       statements.push(database.prepare(`UPDATE appointments SET appointment_date = ?, start_time = ?, end_time = ?, revision = revision + 1 WHERE id = ? AND ${gate}`)
         .bind(target.date, target.time, addMinutes(target.time, booking.duration_minutes), booking.id, changeId));
     } else {
-      // Keep financial status intact: cancelling does not issue or imply a refund.
+      // The protected route triggers any required Stripe refund after this
+      // transaction commits. Keeping these separate avoids holding a D1
+      // transaction open across an external request.
       statements.push(database.prepare(`UPDATE appointments SET status = 'cancelled', revision = revision + 1 WHERE id = ? AND ${gate}`).bind(booking.id, changeId));
     }
   }

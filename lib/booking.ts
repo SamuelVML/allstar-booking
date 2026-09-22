@@ -6,6 +6,18 @@ export type BarberService = {
   isAddOn?: boolean;
 };
 
+export type OpeningPeriod = { start: string; end: string };
+
+export type BookingSettings = {
+  openingHours: Record<number, OpeningPeriod | null>;
+  dailyBreaks: Record<number, OpeningPeriod[]>;
+  handlingBufferMinutes: number;
+  onlineLeadMinutes: number;
+  bookingWindowDays: number;
+  paymentHoldMinutes: number;
+  loyaltyRewardPoints: number;
+};
+
 export const SERVICES: BarberService[] = [
   { id: "haircut", name: "Haircut", durationMinutes: 30, priceCents: 3500 },
   { id: "student-haircut", name: "Student haircut", durationMinutes: 30, priceCents: 3000 },
@@ -30,8 +42,16 @@ export const OPENING_HOURS: Record<number, { start: string; end: string } | null
 
 export const HANDLING_BUFFER_MINUTES = 10;
 export const LOYALTY_REWARD_POINTS = 10;
+export const ONLINE_LEAD_MINUTES = 60;
+export const BOOKING_WINDOW_DAYS = 60;
+export const PAYMENT_HOLD_MINUTES = 30;
 
-const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
+/**
+ * Exported so Backstage can draw the barber's scheduled breaks in the agenda
+ * and the calendar. Availability still reads it through `overlapsBreak`; the
+ * values and the booking rules they drive are unchanged.
+ */
+export const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
   0: [],
   1: [
     { start: "14:15", end: "14:30" },
@@ -65,6 +85,16 @@ const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
   ],
 };
 
+export const DEFAULT_BOOKING_SETTINGS: BookingSettings = {
+  openingHours: OPENING_HOURS,
+  dailyBreaks: DAILY_BREAKS,
+  handlingBufferMinutes: HANDLING_BUFFER_MINUTES,
+  onlineLeadMinutes: ONLINE_LEAD_MINUTES,
+  bookingWindowDays: BOOKING_WINDOW_DAYS,
+  paymentHoldMinutes: PAYMENT_HOLD_MINUTES,
+  loyaltyRewardPoints: LOYALTY_REWARD_POINTS,
+};
+
 export function getService(serviceId: string) {
   return SERVICES.find((service) => service.id === serviceId);
 }
@@ -81,9 +111,12 @@ export function dateIsValid(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T12:00:00Z`)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 }
 
-export function getOpeningHours(date: string) {
+export function getOpeningHours(
+  date: string,
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
+) {
   if (!dateIsValid(date)) return null;
-  return OPENING_HOURS[new Date(`${date}T12:00:00Z`).getUTCDay()] ?? null;
+  return settings.openingHours[new Date(`${date}T12:00:00Z`).getUTCDay()] ?? null;
 }
 
 export function addMinutes(time: string, minutes: number) {
@@ -105,31 +138,36 @@ function timeToMinutes(time: string) {
   return hour * 60 + minute;
 }
 
-function overlapsBreak(date: string, start: string, durationMinutes: number) {
+function overlapsBreak(
+  date: string,
+  start: string,
+  durationMinutes: number,
+  settings: BookingSettings,
+) {
   const day = new Date(`${date}T12:00:00Z`).getUTCDay();
   const startMinutes = timeToMinutes(start);
   const endMinutes = startMinutes + durationMinutes;
-  return (DAILY_BREAKS[day] ?? []).some((period) => (
+  return (settings.dailyBreaks[day] ?? []).some((period) => (
     startMinutes < timeToMinutes(period.end) && endMinutes > timeToMinutes(period.start)
   ));
 }
 
-export function getTodayInEindhoven() {
+export function getTodayInEindhoven(now = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Europe/Amsterdam",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date());
+  }).format(now);
 }
 
-export function getCurrentTimeInEindhoven() {
+export function getCurrentTimeInEindhoven(now = new Date()) {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Amsterdam",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(new Date());
+  }).format(now);
 }
 
 export function buildAvailableTimes(
@@ -137,20 +175,22 @@ export function buildAvailableTimes(
   durationMinutes: number,
   occupiedSlots: Set<string>,
   handlingMinutes = HANDLING_BUFFER_MINUTES,
-  leadMinutes = 60,
+  leadMinutes = ONLINE_LEAD_MINUTES,
+  now = new Date(),
+  settings: BookingSettings = DEFAULT_BOOKING_SETTINGS,
 ) {
-  const hours = getOpeningHours(date);
+  const hours = getOpeningHours(date, settings);
   if (!hours) return [];
 
   const times: string[] = [];
-  const today = getTodayInEindhoven();
-  const currentTime = getCurrentTimeInEindhoven();
+  const today = getTodayInEindhoven(now);
+  const currentTime = getCurrentTimeInEindhoven(now);
   const earliestToday = addMinutes(currentTime, leadMinutes);
 
   const occupiedMinutes = durationMinutes + handlingMinutes;
   for (let time = hours.start; addMinutes(time, occupiedMinutes) <= hours.end; time = addMinutes(time, 5)) {
     if (date === today && time < earliestToday) continue;
-    if (overlapsBreak(date, time, occupiedMinutes)) continue;
+    if (overlapsBreak(date, time, occupiedMinutes, settings)) continue;
     const requiredSlots = makeSlotKeys(date, time, occupiedMinutes);
     if (requiredSlots.every((slot) => !occupiedSlots.has(slot))) times.push(time);
   }

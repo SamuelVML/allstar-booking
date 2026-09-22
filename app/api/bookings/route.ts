@@ -5,13 +5,12 @@ import {
   dateIsValid,
   getService,
   getTodayInEindhoven,
-  HANDLING_BUFFER_MINUTES,
-  LOYALTY_REWARD_POINTS,
   makeSlotKeys,
 } from "@/lib/booking";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
 import { getStripeClient, stripeIsConfigured } from "@/lib/stripe";
 import { sendBookingConfirmation } from "@/lib/booking-email";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 type BookingPayload = {
   serviceId?: string;
@@ -43,7 +42,8 @@ export async function POST(request: Request) {
     if (!service || service.isAddOn || !dateIsValid(date) || !/^\d{2}:\d{2}$/.test(time)) {
       return Response.json({ error: "Choose a valid service, date and time." }, { status: 400 });
     }
-    if (date < getTodayInEindhoven()) {
+    const today = getTodayInEindhoven();
+    if (date < today) {
       return Response.json({ error: "Choose a future appointment." }, { status: 400 });
     }
     if (name.length < 2 || name.length > 80) {
@@ -67,6 +67,15 @@ export async function POST(request: Request) {
     }
 
     const database = getD1();
+    const { settings } = await readBookingSettings(database);
+    const maximumDate = new Date(`${today}T12:00:00Z`);
+    maximumDate.setUTCDate(maximumDate.getUTCDate() + settings.bookingWindowDays);
+    if (date > maximumDate.toISOString().slice(0, 10)) {
+      return Response.json(
+        { error: `Bookings are available up to ${settings.bookingWindowDays} days ahead.` },
+        { status: 400 },
+      );
+    }
     await releaseExpiredPaymentReservations(database);
     const colourAddOn = payload.colourAddOn === true && !service.id.includes("colour");
     const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
@@ -79,7 +88,15 @@ export async function POST(request: Request) {
       .bind(`${date}T00:00`, `${date}T23:59`)
       .all<{ slot_start: string }>();
     const occupied = new Set(occupiedRows.results.map((row) => row.slot_start));
-    const availableTimes = buildAvailableTimes(date, durationMinutes, occupied);
+    const availableTimes = buildAvailableTimes(
+      date,
+      durationMinutes,
+      occupied,
+      settings.handlingBufferMinutes,
+      settings.onlineLeadMinutes,
+      new Date(),
+      settings,
+    );
     if (!availableTimes.includes(time)) {
       return Response.json(
         { error: "That time was just booked. Please choose another time." },
@@ -116,7 +133,9 @@ export async function POST(request: Request) {
     const reference = `AS-${date.replaceAll("-", "")}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
     const endTime = addMinutes(time, durationMinutes);
     const paymentExpiresAt =
-      paymentMethod === "stripe" ? new Date(Date.now() + 31 * 60 * 1000).toISOString() : null;
+      paymentMethod === "stripe"
+        ? new Date(Date.now() + (settings.paymentHoldMinutes + 1) * 60 * 1000).toISOString()
+        : null;
     const status = paymentMethod === "stripe" ? "payment_pending" : "confirmed";
     const paymentStatus = paymentMethod === "stripe" ? "pending" : "due_at_shop";
     const storedPaymentMethod = paymentMethod === "stripe" ? "stripe" : "pay_at_shop";
@@ -149,9 +168,9 @@ export async function POST(request: Request) {
           paymentStatus,
           paymentExpiresAt,
           customer.id,
-          HANDLING_BUFFER_MINUTES,
+          settings.handlingBufferMinutes,
         ),
-      ...makeSlotKeys(date, time, durationMinutes + HANDLING_BUFFER_MINUTES).map((slot) =>
+      ...makeSlotKeys(date, time, durationMinutes + settings.handlingBufferMinutes).map((slot) =>
         database
           .prepare("INSERT INTO appointment_slots (slot_start, appointment_id) VALUES (?, ?)")
           .bind(slot, appointmentId),
@@ -217,6 +236,7 @@ export async function POST(request: Request) {
         endTime,
         priceCents,
         paymentMethod: "Pay at the shop",
+        loyaltyRewardPoints: settings.loyaltyRewardPoints,
       });
     } catch (error) {
       console.error("Booking confirmation email failed", error);
@@ -236,7 +256,7 @@ export async function POST(request: Request) {
           paymentMethod: "Pay at the shop",
           loyalty: {
             currentPoints: customer.loyalty_points,
-            rewardAt: LOYALTY_REWARD_POINTS,
+            rewardAt: settings.loyaltyRewardPoints,
             pendingPoint: 1,
           },
         },
