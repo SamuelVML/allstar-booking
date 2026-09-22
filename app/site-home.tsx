@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import LaunchListForm from "./launch-list-form";
 import Link from "next/link";
 import { formatPrice, OPENING_HOURS, SERVICES } from "@/lib/booking";
 import { COPY, type Language, serviceLabel } from "@/lib/i18n";
@@ -8,8 +9,6 @@ import { ArrowRight, StarMark } from "@/lib/icons";
 
 const ADDRESS_QUERY = "Bakkerstraat+48+5612+EP+Eindhoven";
 const PHONE = "+31686357350";
-const WHATSAPP_LAUNCH_URL =
-  "https://wa.me/31686357350?text=Hi%20All%20Star%2C%20I%27m%20interested%20in%20the%20Mobile%20Barber.";
 
 /** Monday-first, matching how the shop reads its own week. */
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
@@ -147,10 +146,7 @@ export default function SiteHome({
                 <span key={mode}>{mode}</span>
               ))}
             </div>
-            <a className="btn btn-outline" href={WHATSAPP_LAUNCH_URL}>
-              {t.mobileCta}
-              <ArrowRight />
-            </a>
+            <LaunchListForm language={language} />
           </div>
         </div>
       </section>
@@ -179,15 +175,10 @@ export default function SiteHome({
                 <span key={programme}>{programme}</span>
               ))}
             </div>
-            <a
-              className="btn btn-outline"
-              href="https://all-star-barbershop.com/academy/"
-              target="_blank"
-              rel="noreferrer"
-            >
+            <Link className="btn btn-outline" href={language === "nl" ? "/academy?lang=nl" : "/academy"}>
               {t.academyCta}
               <ArrowRight />
-            </a>
+            </Link>
           </div>
         </div>
       </section>
