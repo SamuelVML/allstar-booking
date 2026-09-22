@@ -127,3 +127,13 @@ export const paymentReceipts = sqliteTable("payment_receipts", {
   actorId: text("actor_id").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+
+export const launchListSubscribers = sqliteTable("launch_list_subscribers", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  consent: integer("consent", { mode: "boolean" }).notNull().default(true),
+  source: text("source").notNull().default("mobile_barber_launch_list"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
