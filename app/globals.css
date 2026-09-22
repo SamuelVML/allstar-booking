@@ -1040,3 +1040,36 @@ textarea.input { padding: 12px 14px; min-height: 76px; resize: vertical; font-si
   }
   .toast { left: auto; right: 32px; bottom: 32px; width: min(380px, calc(100% - 64px)); }
 }
+
+
+/* Academy and Mobile Barber launch list */
+.launch-list-form { display: grid; gap: 12px; max-width: 520px; }
+.launch-consent { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; font-size: 13px; color: var(--muted); cursor: pointer; }
+.launch-consent input { width: 20px; height: 20px; margin: 0; accent-color: var(--red); }
+.launch-success { margin: 0; font-size: 13px; font-weight: 700; }
+.academy-hero { display: grid; background: var(--ink); color: var(--on-dark); }
+.academy-hero > div { padding: 52px var(--gutter) 36px; align-self: end; }
+.academy-hero h1 { margin-top: 14px; }
+.academy-hero .lead { max-width: 620px; color: var(--on-dark-body); font-size: 17px; line-height: 1.55; margin: 20px 0 0; }
+.academy-hero img { width: 100%; height: 360px; object-fit: cover; filter: grayscale(.35) contrast(1.05); }
+.academy-intro { max-width: 760px; }
+.academy-intro h2 { margin-top: 14px; }
+.academy-intro .body { color: var(--muted); font-size: 16px; line-height: 1.55; margin: 18px 0 0; }
+.academy-program-grid { border-top: 1px solid var(--hairline); }
+.academy-program { padding: 28px var(--gutter); border-bottom: 1px solid var(--hairline); }
+.academy-program .service-no { color: var(--red); font-size: 11px; font-weight: 800; }
+.academy-program .kicker { margin-top: 22px; }
+.academy-program h2 { margin-top: 10px; }
+.academy-program > p:last-child { color: var(--muted); max-width: 620px; line-height: 1.55; }
+.academy-contact > p:not(.kicker) { color: var(--on-dark-body); max-width: 600px; margin: 16px 0 22px; }
+.academy-contact h2 { margin-top: 12px; }
+
+@media (min-width: 760px) {
+  .academy-hero { grid-template-columns: 1fr 1fr; min-height: 560px; }
+  .academy-hero > div { padding: 64px 7vw; }
+  .academy-hero img { height: 100%; min-height: 560px; }
+  .academy-program-grid { display: grid; grid-template-columns: repeat(2, 1fr); }
+  .academy-program:nth-child(odd) { border-right: 1px solid var(--hairline); }
+  .academy-program { padding: 42px 7vw; }
+  .academy-intro, .academy-contact { padding-left: 7vw; padding-right: 7vw; }
+}
