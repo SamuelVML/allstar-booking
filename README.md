@@ -113,6 +113,27 @@ Run `npm test` with Node 22.13+ to run every suite, or the individual scripts:
   asserts it refuses an unauthenticated visitor. Run `npm run build` first; set
   `BACKSTAGE_HTML_OUT=<dir>` to write the renders out for visual review.
 
+`npm test` stays browser-free and fast. The interactive Backstage sheets are
+covered separately by `npm run test:ui`, which needs Chromium:
+
+```sh
+npx playwright install chromium   # once
+npm run test:ui
+```
+
+It starts a Vite dev server over `tests/ui/harness.tsx`, which mounts the real
+`DayActionsProvider` with `next/navigation`, `next/link` and `fetch` stubbed,
+and drives the add walk-in and reschedule flows with Playwright — the parts
+that Cloudflare Access otherwise puts out of reach locally. It covers the
+recommendation panel's endpoint and cadence, off-grid picks landing in the time
+grid, mutation payloads including the `revision` check, and that destructive and
+financial actions send nothing until confirmed.
+
+A green run is not a deployed check: it cannot cover Cloudflare Access itself,
+real D1 data, the same-origin and content-type check in
+`authoriseStaffMutation`, or email delivery. Set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to reuse a Chromium you already have.
+
 All of these use an in-memory database and local signing keys; no customer
 emails are sent and nothing touches a deployed environment.
 

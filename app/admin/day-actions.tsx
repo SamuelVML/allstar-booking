@@ -107,8 +107,10 @@ export default function DayActionsProvider({
   const [sheet, setSheet] = useState<Sheet>(null);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [busy, setBusy] = useState(false);
-  // Bumped after every schedule mutation so Samaritan re-ranks against the
-  // day as it now stands.
+  // Bumped after every schedule mutation so Samaritan re-ranks against the day
+  // as it now stands. Today the sheets close on save, so a re-opened panel
+  // would refetch on mount anyway; the bump is what keeps that true for any
+  // panel that outlives a mutation.
   const [scheduleRevision, setScheduleRevision] = useState(0);
   const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null);
 
