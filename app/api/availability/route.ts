@@ -1,5 +1,6 @@
 import { getD1 } from "@/db";
 import {
+  addMinutes,
   buildAvailableTimes,
   dateIsValid,
   formatAppointmentDate,
@@ -44,17 +45,30 @@ export async function GET(request: Request) {
 
     const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
     if (!date) {
-      const recommendations: Array<{ date: string; dateLabel: string; time: string }> = [];
+      const recommendations: Array<{
+        date: string;
+        dateLabel: string;
+        time: string;
+        reason: "first" | "gap";
+      }> = [];
       for (let offset = 0; offset <= 60 && recommendations.length < 3; offset += 1) {
         const candidate = new Date(`${today}T12:00:00Z`);
         candidate.setUTCDate(candidate.getUTCDate() + offset);
         const candidateDate = candidate.toISOString().slice(0, 10);
         const available = buildAvailableTimes(candidateDate, durationMinutes, occupied);
         if (available.length > 0) {
+          // `reason` describes the slot that was already being recommended: it
+          // is additive, and the slot chosen is unchanged. "gap" means the
+          // preceding five minutes are taken, so this booking butts onto an
+          // existing one instead of opening a fresh hole in the day.
+          const startsAfterBooking = occupied.has(
+            `${candidateDate}T${addMinutes(available[0], -5)}`,
+          );
           recommendations.push({
             date: candidateDate,
             dateLabel: formatAppointmentDate(candidateDate),
             time: available[0],
+            reason: startsAfterBooking ? "gap" : "first",
           });
         }
       }

@@ -31,7 +31,12 @@ export const OPENING_HOURS: Record<number, { start: string; end: string } | null
 export const HANDLING_BUFFER_MINUTES = 10;
 export const LOYALTY_REWARD_POINTS = 10;
 
-const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
+/**
+ * Exported so Backstage can draw the barber's scheduled breaks in the agenda
+ * and the calendar. Availability still reads it through `overlapsBreak`; the
+ * values and the booking rules they drive are unchanged.
+ */
+export const DAILY_BREAKS: Record<number, Array<{ start: string; end: string }>> = {
   0: [],
   1: [
     { start: "14:15", end: "14:30" },
