@@ -8,6 +8,7 @@ import {
 import { rankRecommendations } from "@/lib/recommendations";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
 import { getStaffUser } from "@/lib/staff-auth";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 const PRIVATE_HEADERS = { "Cache-Control": "private, no-store, max-age=0" };
 
@@ -35,14 +36,16 @@ export async function GET(request: Request) {
 
     const now = new Date();
     const today = getTodayInEindhoven(now);
-    const maximumDate = addDays(today, 60);
+    const database = getD1();
+    const { settings } = await readBookingSettings(database);
+    const maximumDate = addDays(today, settings.bookingWindowDays);
     if (date && (date < today || date > maximumDate)) {
-      return Response.json({ error: "Choose today or a future date within 60 days." }, { status: 400, headers: PRIVATE_HEADERS });
+      return Response.json({ error: `Choose today or a future date within ${settings.bookingWindowDays} days.` }, { status: 400, headers: PRIVATE_HEADERS });
     }
 
+    const recommendationDays = Math.min(14, settings.bookingWindowDays);
     const rangeStart = date || today;
-    const rangeEnd = date || addDays(today, 14);
-    const database = getD1();
+    const rangeEnd = date || addDays(today, recommendationDays);
     await releaseExpiredPaymentReservations(database);
     const rows = await database
       .prepare(
@@ -56,16 +59,17 @@ export async function GET(request: Request) {
     );
     const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
     const availableDays = [];
-    const daysToScan = date ? 0 : 14;
+    const daysToScan = date ? 0 : recommendationDays;
     for (let offset = 0; offset <= daysToScan; offset += 1) {
       const candidateDate = date || addDays(today, offset);
       const times = buildAvailableTimes(
         candidateDate,
         durationMinutes,
         occupied,
-        undefined,
+        settings.handlingBufferMinutes,
         0,
         now,
+        settings,
       );
       if (times.length > 0) availableDays.push({ date: candidateDate, times });
     }
@@ -77,6 +81,7 @@ export async function GET(request: Request) {
       serviceName: service.name,
       limit: 3,
       distinctDates: false,
+      handlingMinutes: settings.handlingBufferMinutes,
     });
 
     return Response.json({

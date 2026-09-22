@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { getTodayInEindhoven } from "@/lib/booking";
 import { isLanguage, type Language } from "@/lib/i18n";
 import SiteHome from "./site-home";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 export const metadata: Metadata = {
   title: "All Star Barbershop | Eindhoven",
@@ -18,6 +19,7 @@ export default async function Home({
 }) {
   const params = await searchParams;
   const language: Language = isLanguage(params.lang) ? params.lang : "en";
+  const { settings } = await readBookingSettings();
 
   // Resolved server-side so "today" in the opening hours matches the shop's
   // clock rather than the visitor's device.
@@ -25,5 +27,11 @@ export default async function Home({
     `${getTodayInEindhoven()}T12:00:00Z`,
   ).getUTCDay();
 
-  return <SiteHome initialLanguage={language} todayWeekday={todayWeekday} />;
+  return (
+    <SiteHome
+      initialLanguage={language}
+      todayWeekday={todayWeekday}
+      bookingSettings={settings}
+    />
+  );
 }

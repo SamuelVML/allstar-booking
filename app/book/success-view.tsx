@@ -21,6 +21,7 @@ export type Booking = {
   /** "stripe" means the customer already paid online. */
   paymentMethod: string;
   email?: string;
+  loyalty?: { rewardAt: number };
 };
 
 function icsTimestamp(date: string, time: string) {
@@ -69,6 +70,7 @@ export default function SuccessView({
 }) {
   const t = COPY[language];
   const paidOnline = booking.paymentMethod === "stripe";
+  const rewardAt = booking.loyalty?.rewardAt ?? 10;
 
   const dateLabel = new Intl.DateTimeFormat(locale(language), {
     timeZone: "Europe/Amsterdam",
@@ -146,7 +148,11 @@ export default function SuccessView({
             <StarMark />
             <div>
               <strong>{t.loyaltyTitleShort}</strong>
-              <p className="pretty">{t.loyaltySuccess}</p>
+              <p className="pretty">
+                {language === "nl"
+                  ? `Je punt wordt na je bezoek toegevoegd. ${rewardAt} punten = een gratis volledige knipbeurt en een haarverzorgingsproduct.`
+                  : `Your point is added after the visit. ${rewardAt} points = a free full-service haircut and a haircare product.`}
+              </p>
             </div>
           </div>
 

@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { formatPrice, HANDLING_BUFFER_MINUTES, SERVICES } from "@/lib/booking";
+import { formatPrice, type BookingSettings, SERVICES } from "@/lib/booking";
 import {
   type AdminAppointment,
   canManage,
@@ -20,6 +20,25 @@ import SamaritanPanel from "./samaritan-panel";
 
 const BOOKABLE = SERVICES.filter((service) => !service.isAddOn);
 const RESCHEDULE_DAYS = 14;
+
+type TimeOffConflict = {
+  reference: string;
+  revision: number;
+  date: string;
+  time: string;
+  customer: string;
+  paidOnline: boolean;
+  priceCents: number;
+};
+
+class ApiError extends Error {
+  conflicts: TimeOffConflict[];
+
+  constructor(message: string, conflicts: TimeOffConflict[] = []) {
+    super(message);
+    this.conflicts = conflicts;
+  }
+}
 
 type Sheet =
   | { kind: "appointment"; reference: string }
@@ -93,6 +112,7 @@ export default function DayActionsProvider({
   now,
   appointments,
   blocks,
+  settings,
   children,
 }: {
   date: string;
@@ -101,6 +121,7 @@ export default function DayActionsProvider({
   now: string;
   appointments: AdminAppointment[];
   blocks: TimeOffBlock[];
+  settings: BookingSettings;
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -123,6 +144,9 @@ export default function DayActionsProvider({
   const [blockStart, setBlockStart] = useState("");
   const [blockEnd, setBlockEnd] = useState("");
   const [blockReason, setBlockReason] = useState("");
+  const [blockScope, setBlockScope] = useState<"hours" | "days">("hours");
+  const [blockUntilDate, setBlockUntilDate] = useState(date);
+  const [blockConflicts, setBlockConflicts] = useState<TimeOffConflict[]>([]);
 
   // Reschedule sheet
   const [moveDate, setMoveDate] = useState("");
@@ -177,10 +201,16 @@ export default function DayActionsProvider({
     const result = (await response.json().catch(() => ({}))) as {
       error?: string;
       notificationsSent?: boolean;
+      refundStatus?: "not_needed" | "refunded" | "pending";
+      conflicts?: TimeOffConflict[];
+      blockedDays?: number;
+      cancelledBookings?: number;
+      refundsPending?: number;
     };
     if (!response.ok) {
-      throw new Error(
+      throw new ApiError(
         result.error ?? "Unable to save. Refresh to check whether it was saved before retrying.",
+        result.conflicts,
       );
     }
     return result;
@@ -188,7 +218,10 @@ export default function DayActionsProvider({
 
   /** Runs a confirmed mutation, then refreshes the server-rendered day. */
   function runConfirmed(
-    request: () => Promise<{ notificationsSent?: boolean }>,
+    request: () => Promise<{
+      notificationsSent?: boolean;
+      refundStatus?: "not_needed" | "refunded" | "pending";
+    }>,
     successMessage: string,
   ) {
     return async () => {
@@ -198,7 +231,12 @@ export default function DayActionsProvider({
         setScheduleRevision((value) => value + 1);
         setConfirm(null);
         setSheet(null);
-        if (result.notificationsSent === false) {
+        if (result.refundStatus === "pending") {
+          showToast(
+            "Booking cancelled, but Stripe could not confirm the refund. Check Stripe before retrying.",
+            true,
+          );
+        } else if (result.notificationsSent === false) {
           showToast(
             "Saved, but the email did not go out. Contact the customer directly.",
             true,
@@ -237,7 +275,7 @@ export default function DayActionsProvider({
   /* -------------------------------------------------------- confirmations */
 
   function askComplete(appointment: AdminAppointment) {
-    const info = paymentInfo(appointment);
+    const info = paymentInfo(appointment, settings.paymentHoldMinutes);
     setConfirm({
       title: "Complete visit?",
       body: `Mark ${appointment.customer_name}'s ${appointment.service_name} as completed${
@@ -262,8 +300,10 @@ export default function DayActionsProvider({
         appointment.customer_email ? " The customer receives a cancellation email." : ""
       }`,
       warning:
-        appointment.payment_status === "paid"
-          ? "Payment was already received. This does not issue a refund — handle it separately."
+        appointment.payment_status === "paid" && appointment.payment_method === "stripe"
+          ? `${formatPrice(appointment.price_cents)} will be refunded automatically through Stripe.`
+          : appointment.payment_status === "paid"
+            ? "This shop payment cannot be refunded automatically. Return it using the original shop payment method."
           : undefined,
       cta: "Cancel booking",
       destructive: true,
@@ -332,13 +372,16 @@ export default function DayActionsProvider({
       blocks,
       // Staff can start now — there is no one-hour online lead time — but not
       // in the past.
-      date === today ? { from: now } : {},
+      date === today ? { from: now, settings } : { settings },
     ),
     walkInTime,
   );
   const walkInReady = walkInName.trim().length > 0 && walkInTime.length > 0;
-  const blockReady =
-    blockStart.length > 0 && blockEnd.length > 0 && blockEnd > blockStart && blockReason.trim().length > 0;
+  const blockReady = blockReason.trim().length > 0 && (
+    blockScope === "days"
+      ? blockUntilDate >= date
+      : blockStart.length > 0 && blockEnd.length > 0 && blockEnd > blockStart
+  );
 
   async function saveWalkIn() {
     setBusy(true);
@@ -363,23 +406,45 @@ export default function DayActionsProvider({
     }
   }
 
-  async function saveBlock() {
+  async function saveBlock(cancelConflicts = false) {
     setBusy(true);
     try {
-      await post("/api/admin/operations", {
-        id: crypto.randomUUID(),
-        action: "block",
-        date,
-        start: blockStart,
-        end: blockEnd,
-        reason: blockReason.trim(),
-      });
+      const result = await post(
+        "/api/admin/operations",
+        blockScope === "days"
+          ? {
+              id: crypto.randomUUID(),
+              action: "block_range",
+              fromDate: date,
+              toDate: blockUntilDate,
+              reason: blockReason.trim(),
+              cancelConflicts,
+            }
+          : {
+              id: crypto.randomUUID(),
+              action: "block",
+              date,
+              start: blockStart,
+              end: blockEnd,
+              reason: blockReason.trim(),
+            },
+      );
       setScheduleRevision((value) => value + 1);
+      setBlockConflicts([]);
       setSheet(null);
-      showToast(`Time off blocked · ${blockStart}–${blockEnd}`);
+      showToast(
+        blockScope === "days"
+          ? `Vacation blocked · ${result.blockedDays ?? 1} open day${result.blockedDays === 1 ? "" : "s"}${result.cancelledBookings ? ` · ${result.cancelledBookings} booking${result.cancelledBookings === 1 ? "" : "s"} cancelled` : ""}`
+          : `Time off blocked · ${blockStart}–${blockEnd}`,
+        Boolean(result.refundsPending),
+      );
       router.refresh();
     } catch (reason) {
-      showToast(reason instanceof Error ? reason.message : "Unable to save.", true);
+      if (reason instanceof ApiError && reason.conflicts.length > 0) {
+        setBlockConflicts(reason.conflicts);
+      } else {
+        showToast(reason instanceof Error ? reason.message : "Unable to save.", true);
+      }
     } finally {
       setBusy(false);
     }
@@ -434,14 +499,14 @@ export default function DayActionsProvider({
       dow: new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "short" }).format(
         new Date(`${value}T12:00:00Z`),
       ),
-      closed: !openingHoursFor(value),
+      closed: !openingHoursFor(value, settings),
     };
   });
 
   const moveSlots =
     selected && moveDate
       ? withPickedTime(
-          staffSlots(moveDate, durationOf(selected), [], [], {}).map((slot) => ({
+          staffSlots(moveDate, durationOf(selected), [], [], { settings }).map((slot) => ({
             time: slot.time,
             // The server is the authority on availability for another day.
             available:
@@ -466,6 +531,9 @@ export default function DayActionsProvider({
       setBlockStart("");
       setBlockEnd("");
       setBlockReason("");
+      setBlockScope("hours");
+      setBlockUntilDate(date);
+      setBlockConflicts([]);
       setSheet({ kind: "add" });
     },
     completeAppointment: (reference) => {
@@ -535,10 +603,10 @@ export default function DayActionsProvider({
               <dd
                 style={{
                   fontWeight: 700,
-                  color: TONE_COLOR[paymentInfo(selected).tone],
+                  color: TONE_COLOR[paymentInfo(selected, settings.paymentHoldMinutes).tone],
                 }}
               >
-                {paymentInfo(selected).line}
+                {paymentInfo(selected, settings.paymentHoldMinutes).line}
               </dd>
               <dt>Reference</dt>
               <dd className="num" style={{ userSelect: "all" }}>
@@ -609,7 +677,7 @@ export default function DayActionsProvider({
 
             {selected.status === "payment_pending" && (
               <p className="notice" style={{ margin: "16px var(--gutter) 0" }}>
-                Online payment pending — the slot is held for 30 minutes. Stripe bookings
+                Online payment pending — the slot is held for {settings.paymentHoldMinutes} minutes. Stripe bookings
                 can&apos;t be marked paid manually.
               </p>
             )}
@@ -645,7 +713,8 @@ export default function DayActionsProvider({
 
             <p className="sheet-foot pretty">
               Completing a visit doesn&apos;t record payment. Recording a payment doesn&apos;t
-              charge a card. Refunds are handled separately.
+              charge a card. Cancelling a paid online booking requests its Stripe refund
+              automatically; shop payments are returned manually.
             </p>
           </div>
         </>
@@ -751,7 +820,7 @@ export default function DayActionsProvider({
               )}
 
               <p className="muted" style={{ margin: "12px 0 0", fontSize: 12 }}>
-                Service duration and the {HANDLING_BUFFER_MINUTES} min handling buffer are
+                Service duration and the {settings.handlingBufferMinutes} min handling buffer are
                 reserved automatically. The customer gets an email.
               </p>
 
@@ -863,7 +932,7 @@ export default function DayActionsProvider({
 
                   <p className="eyebrow" style={{ margin: "14px 0 6px" }}>
                     Start time · {walkInServiceRecord.durationMinutes} min +{" "}
-                    {HANDLING_BUFFER_MINUTES} min buffer
+                    {settings.handlingBufferMinutes} min buffer
                   </p>
                   {walkInSlots.length === 0 ? (
                     <p className="muted" style={{ fontSize: 14 }}>
@@ -899,8 +968,8 @@ export default function DayActionsProvider({
                   </label>
 
                   <p className="muted" style={{ margin: "12px 0 0", fontSize: 12 }}>
-                    Walk-ins get no email and no loyalty account. They can start now — no
-                    one-hour lead time.
+                    Walk-ins get no email and no loyalty account. The online lead time does
+                    not apply to them.
                   </p>
 
                   <button
@@ -919,35 +988,73 @@ export default function DayActionsProvider({
                 </>
               ) : (
                 <>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
-                      gap: 8,
-                      marginTop: 14,
-                    }}
-                  >
-                    <label className="field">
-                      <span className="label">From</span>
-                      <input
-                        className="input"
-                        type="time"
-                        step={300}
-                        value={blockStart}
-                        onChange={(event) => setBlockStart(event.target.value)}
-                      />
-                    </label>
-                    <label className="field">
-                      <span className="label">Until</span>
-                      <input
-                        className="input"
-                        type="time"
-                        step={300}
-                        value={blockEnd}
-                        onChange={(event) => setBlockEnd(event.target.value)}
-                      />
-                    </label>
+                  <div className="seg" role="radiogroup" aria-label="Time-off duration" style={{ marginTop: 14 }}>
+                    <button
+                      type="button"
+                      aria-pressed={blockScope === "hours"}
+                      onClick={() => {
+                        setBlockScope("hours");
+                        setBlockConflicts([]);
+                      }}
+                    >
+                      Part of day
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={blockScope === "days"}
+                      onClick={() => {
+                        setBlockScope("days");
+                        setBlockConflicts([]);
+                      }}
+                    >
+                      Full day / vacation
+                    </button>
                   </div>
+
+                  {blockScope === "hours" ? (
+                    <div className="time-off-fields">
+                      <label className="field">
+                        <span className="label">From</span>
+                        <input
+                          className="input"
+                          type="time"
+                          step={300}
+                          value={blockStart}
+                          onChange={(event) => setBlockStart(event.target.value)}
+                        />
+                      </label>
+                      <label className="field">
+                        <span className="label">Until</span>
+                        <input
+                          className="input"
+                          type="time"
+                          step={300}
+                          value={blockEnd}
+                          onChange={(event) => setBlockEnd(event.target.value)}
+                        />
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="time-off-fields">
+                      <label className="field">
+                        <span className="label">First day</span>
+                        <input className="input" type="date" value={date} disabled />
+                      </label>
+                      <label className="field">
+                        <span className="label">Last day</span>
+                        <input
+                          className="input"
+                          type="date"
+                          min={date}
+                          value={blockUntilDate}
+                          onChange={(event) => {
+                            setBlockUntilDate(event.target.value);
+                            setBlockConflicts([]);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
                   <label className="field" style={{ marginTop: 12 }}>
                     <span className="label">Reason</span>
                     <input
@@ -955,22 +1062,66 @@ export default function DayActionsProvider({
                       value={blockReason}
                       maxLength={200}
                       placeholder="Lunch, appointment, day off…"
-                      onChange={(event) => setBlockReason(event.target.value)}
+                      onChange={(event) => {
+                        setBlockReason(event.target.value);
+                        setBlockConflicts([]);
+                      }}
                     />
                   </label>
                   <p className="muted" style={{ margin: "12px 0 0", fontSize: 12 }}>
-                    Blocks online bookings for this period. Existing appointments in the range
-                    must be moved or cancelled first.
+                    {blockScope === "days"
+                      ? "Blocks every open shop day in this period. Existing appointments can be opened and rescheduled, or cancelled together below. Paid Stripe bookings are refunded automatically."
+                      : "Blocks online bookings for this period. Existing appointments in the range must be moved or cancelled first."}
                   </p>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-block"
-                    style={{ marginTop: 16 }}
-                    disabled={!blockReady || busy}
-                    onClick={() => void saveBlock()}
-                  >
-                    {busy ? "Saving…" : "Block time off"}
-                  </button>
+
+                  {blockConflicts.length > 0 && (
+                    <div className="notice time-off-conflicts" role="alert">
+                      <strong>
+                        {blockConflicts.length} appointment{blockConflicts.length === 1 ? "" : "s"} need attention
+                      </strong>
+                      <p>
+                        Open each day to reschedule selected customers, or cancel all below.
+                        Online Stripe payments will be refunded automatically.
+                      </p>
+                      <ul>
+                        {blockConflicts.map((conflict) => (
+                          <li key={conflict.reference}>
+                            <a href={`/admin/bookings?date=${conflict.date}`}>
+                              {shortDate(conflict.date)} · {conflict.time} · {conflict.customer}
+                            </a>
+                            {conflict.paidOnline ? ` · refund ${formatPrice(conflict.priceCents)}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-block"
+                        disabled={busy}
+                        onClick={() => void saveBlock(true)}
+                      >
+                        {busy
+                          ? "Cancelling and blocking…"
+                          : `Cancel all ${blockConflicts.length} and block vacation`}
+                      </button>
+                    </div>
+                  )}
+                  {blockConflicts.length === 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-block"
+                      style={{ marginTop: 16 }}
+                      disabled={!blockReady || busy}
+                      onClick={() => void saveBlock(false)}
+                    >
+                      {busy
+                        ? "Saving…"
+                        : blockScope === "days"
+                          ? blockUntilDate === date
+                            ? "Block full day"
+                            : `Block vacation · through ${shortDate(blockUntilDate)}`
+                          : "Block time off"}
+                    </button>
+                  )}
                 </>
               )}
             </div>

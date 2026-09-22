@@ -2,7 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { formatPrice, OPENING_HOURS, SERVICES } from "@/lib/booking";
+import {
+  formatPrice,
+  type BookingSettings,
+  SERVICES,
+} from "@/lib/booking";
 import { COPY, type Language, serviceLabel } from "@/lib/i18n";
 import { ArrowRight, StarMark } from "@/lib/icons";
 
@@ -17,10 +21,12 @@ const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
 export default function SiteHome({
   initialLanguage,
   todayWeekday,
+  bookingSettings,
 }: {
   initialLanguage: Language;
   /** Resolved on the server in Europe/Amsterdam so "today" matches the shop. */
   todayWeekday: number;
+  bookingSettings: BookingSettings;
 }) {
   const [language, setLanguage] = useState<Language>(initialLanguage);
   const t = COPY[language];
@@ -116,7 +122,13 @@ export default function SiteHome({
               <span className="step-no">{index + 1}</span>
               <span style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                 <strong>{step.title}</strong>
-                <span className="body pretty">{step.body}</span>
+                <span className="body pretty">
+                  {index === 0
+                    ? language === "nl"
+                      ? `Alleen vrije tijden worden getoond. Boek tot ${bookingSettings.bookingWindowDays} dagen vooruit.`
+                      : `Only free times are shown. Book up to ${bookingSettings.bookingWindowDays} days ahead.`
+                    : step.body}
+                </span>
               </span>
             </li>
           ))}
@@ -202,7 +214,7 @@ export default function SiteHome({
         </p>
         <dl className="hours">
           {WEEK_ORDER.map((weekday) => {
-            const hours = OPENING_HOURS[weekday];
+            const hours = bookingSettings.openingHours[weekday];
             const isToday = weekday === todayWeekday;
             return (
               <div key={weekday} style={{ display: "contents" }}>

@@ -3,6 +3,7 @@ import { getD1 } from "@/db";
 import { confirmPaidAppointment, expirePaymentAppointment } from "@/lib/payments";
 import { getStripeClient, getStripeWebhookSecret } from "@/lib/stripe";
 import { sendBookingConfirmation } from "@/lib/booking-email";
+import { readBookingSettings } from "@/lib/booking-settings";
 
 type ConfirmedAppointment = {
   id: string;
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
           .first<ConfirmedAppointment>();
         if (appointment) {
           try {
+            const { settings } = await readBookingSettings(database);
             await sendBookingConfirmation({
               appointmentId: appointment.id,
               reference: appointment.reference,
@@ -66,6 +68,7 @@ export async function POST(request: Request) {
               endTime: appointment.end_time,
               priceCents: appointment.price_cents,
               paymentMethod: "Paid online",
+              loyaltyRewardPoints: settings.loyaltyRewardPoints,
             });
           } catch (error) {
             console.error("Paid booking confirmation email failed", error);

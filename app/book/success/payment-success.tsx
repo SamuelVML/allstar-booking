@@ -25,7 +25,13 @@ function minutesBetween(start: string, end: string) {
   return endHour * 60 + endMinute - (startHour * 60 + startMinute);
 }
 
-export default function PaymentSuccess({ language }: { language: Language }) {
+export default function PaymentSuccess({
+  language,
+  loyaltyRewardPoints,
+}: {
+  language: Language;
+  loyaltyRewardPoints: number;
+}) {
   const [booking, setBooking] = useState<Booking | null>(null);
   const [error, setError] = useState("");
   const t = COPY[language];
@@ -52,6 +58,7 @@ export default function PaymentSuccess({ language }: { language: Language }) {
           priceCents: paid.priceCents,
           // This page is only reached after Stripe has taken the payment.
           paymentMethod: "stripe",
+          loyalty: { rewardAt: loyaltyRewardPoints },
         });
       })
       .catch((reason) => {
@@ -59,7 +66,7 @@ export default function PaymentSuccess({ language }: { language: Language }) {
         setError(reason instanceof Error ? reason.message : "Confirmation failed.");
       });
     return () => controller.abort();
-  }, []);
+  }, [loyaltyRewardPoints]);
 
   if (booking) return <SuccessView booking={booking} language={language} />;
 
