@@ -58,6 +58,7 @@ function load(relative) {
 const auth = load('lib/staff-auth.ts');
 const management = load('lib/booking-management.ts');
 const bookingHelpers = load('lib/booking.ts');
+const recommendationEngine = load('lib/recommendations.ts');
 const changes = load('app/api/admin/bookings/change/route.ts');
 const complete = load('app/api/admin/bookings/complete/route.ts');
 const availability = load('app/api/admin/bookings/availability/route.ts');
@@ -177,4 +178,42 @@ assert.equal(row('occupied').start_time,'13:00'); assert.equal(slots('occupied')
 const bad = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({action:'payment',id:crypto.randomUUID(),reference:'occupied',revision:0,method:'wire'})}));
 assert.equal(bad.status,400);
 console.log('PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations');
+
+const fixedRecommendationNow = new Date('2026-09-22T11:42:00Z'); // 13:42 in Eindhoven.
+const immediateTimes = bookingHelpers.buildAvailableTimes('2026-09-22',30,new Set(),10,0,fixedRecommendationNow);
+assert.equal(immediateTimes.includes('13:40'),false,'Backstage must never recommend a past time');
+assert.equal(immediateTimes.includes('13:45'),true,'Backstage may recommend the next five-minute opening');
+const customerTimes = bookingHelpers.buildAvailableTimes('2026-09-22',30,new Set(),10,60,fixedRecommendationNow);
+assert.equal(customerTimes.includes('14:40'),false,'Customer recommendations keep the sixty-minute lead time');
+assert.equal(customerTimes.includes('14:45'),true);
+const recommendationDate = '2026-09-23';
+const recommendationOccupied = new Set([
+  `${recommendationDate}T13:35`,
+  `${recommendationDate}T14:20`,
+]);
+const rankedRecommendations = recommendationEngine.rankRecommendations({
+  availableDays: [{date:recommendationDate,times:['10:00','13:40','15:00']}],
+  occupiedSlots: recommendationOccupied,
+  durationMinutes: 30,
+  serviceName: 'Haircut',
+  limit: 3,
+  distinctDates: false,
+});
+assert.equal(rankedRecommendations[0].time,'13:40');
+assert.match(rankedRecommendations[0].reason,/between two appointments/);
+const multiDayRecommendations = recommendationEngine.rankRecommendations({
+  availableDays: [
+    {date:'2026-09-23',times:['10:00','11:00']},
+    {date:'2026-09-24',times:['10:00']},
+    {date:'2026-09-25',times:['10:00']},
+  ],
+  occupiedSlots: new Set(),
+  durationMinutes: 30,
+  serviceName: 'Haircut',
+  limit: 2,
+  distinctDates: true,
+});
+assert.deepEqual(Array.from(multiDayRecommendations, item => item.date),['2026-09-23','2026-09-24']);
+console.log('PASS: real-time cutoffs, compact-gap ranking and distinct-day customer recommendations');
+
 db.close();
