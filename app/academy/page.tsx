@@ -14,11 +14,13 @@ const programmes = [
   { title: "Custom Team Training", meta: "Salons & teams", body: "Tailored sessions for barber and salon teams, designed around the techniques, standards and workflow your team needs to improve." },
 ];
 
-export default function AcademyPage() {
+export default async function AcademyPage({ searchParams }: { searchParams: Promise<{ lang?: string }> }) {
+  const { lang } = await searchParams;
+  const nl = lang === "nl";
   return <main className="site academy-page">
     <header className="site-top">
-      <Link className="brand" href="/"><StarMark /><span className="brand-name"><b>ALL STAR</b><span>ACADEMY · EINDHOVEN</span></span></Link>
-      <Link className="btn btn-on-dark btn-s" href="/">Back to All Star</Link>
+      <Link className="brand" href={nl ? "/?lang=nl" : "/"}><StarMark /><span className="brand-name"><b>ALL STAR</b><span>ACADEMY · EINDHOVEN</span></span></Link>
+      <Link className="btn btn-on-dark btn-s" href={nl ? "/?lang=nl" : "/"}>{nl ? "Terug naar All Star" : "Back to All Star"}</Link>
     </header>
     <section className="academy-hero">
       <div><p className="kicker">All Star Academy</p><h1 className="display display-xl">Learn the craft.</h1><p className="lead pretty">Practical, results-driven barber education — from complete beginner training to advanced skill courses, personal coaching and tailored team training.</p></div>
