@@ -16,6 +16,7 @@ db.exec('PRAGMA foreign_keys=ON');
 for (const name of fs.readdirSync('drizzle').filter(name => name.endsWith('.sql')).sort()) db.exec(fs.readFileSync(`drizzle/${name}`, 'utf8'));
 let databaseReads = 0;
 let stripeRefundCalls = 0;
+let stripeRefundFailures = 0;
 const stripeMock = {
   getStripeClient() {
     return {
@@ -23,6 +24,10 @@ const stripeMock = {
       refunds: {
         create: async () => {
           stripeRefundCalls += 1;
+          if (stripeRefundFailures > 0) {
+            stripeRefundFailures -= 1;
+            throw new Error('Temporary Stripe failure');
+          }
           return { id: 're_test' };
         },
       },
@@ -156,6 +161,26 @@ assert.equal(row('refundable').status, 'cancelled');
 assert.equal(row('refundable').payment_status, 'refunded');
 assert.equal(stripeRefundCalls, 1);
 assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='refundable'").get().status, 'succeeded');
+
+const retryable = seed('retryable','17:00','confirmed',true);
+stripeRefundFailures = 1;
+const failedRefundResponse = await changes.POST(new Request('https://booking.example.com/api/admin/bookings/change', {
+  method: 'POST', headers, body: JSON.stringify({ reference: retryable.reference, revision: 0, action: 'cancel' }),
+}));
+assert.equal(failedRefundResponse.status, 200);
+assert.equal((await failedRefundResponse.json()).refundStatus, 'pending');
+assert.equal(row('retryable').status, 'cancelled');
+assert.equal(row('retryable').payment_status, 'paid');
+assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='retryable'").get().status, 'failed');
+const retriedRefundResponse = await operations.POST(new Request('https://booking.example.com/api/admin/operations', {
+  method: 'POST', headers, body: JSON.stringify({
+    action: 'retry_refund', id: crypto.randomUUID(), reference: retryable.reference, revision: row('retryable').revision,
+  }),
+}));
+assert.equal(retriedRefundResponse.status, 200);
+assert.equal((await retriedRefundResponse.json()).refundStatus, 'refunded');
+assert.equal(row('retryable').payment_status, 'refunded');
+assert.equal(db.prepare("SELECT status FROM payment_refunds WHERE appointment_id='retryable'").get().status, 'succeeded');
 console.log('PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety');
 
 const blockId = crypto.randomUUID();
@@ -201,6 +226,11 @@ const blockedMove = {...database, async batch(statements) {
 }};
 await assert.rejects(management.changeBooking(blockedMove,row('occupied'),'reschedule','staff-id',{date,time:'17:20'}),/slot changed/);
 assert.equal(row('occupied').start_time,'13:00'); assert.equal(slots('occupied').length,8);
+const vacationCollision = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({
+  action:'block_range',id:crypto.randomUUID(),fromDate:date,toDate:date,reason:'Collision test',cancelConflicts:true,
+})}));
+assert.equal(vacationCollision.status,409);
+assert.equal(row('occupied').status,'confirmed','a failed vacation preflight must not cancel bookings');
 const bad = await operations.POST(new Request('https://booking.example.com/api/admin/operations',{method:'POST',headers,body:JSON.stringify({action:'payment',id:crypto.randomUUID(),reference:'occupied',revision:0,method:'wire'})}));
 assert.equal(bad.status,400);
 console.log('PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations');

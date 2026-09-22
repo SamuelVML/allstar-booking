@@ -63,6 +63,7 @@ const mocks = {
   'next/headers': { headers: async () => requestHeaders },
   'next/navigation': {
     notFound() { throw new Error('notFound() — the page refused to render without staff auth'); },
+    redirect(location) { throw Object.assign(new Error(`redirect(${location})`), { location }); },
     usePathname: () => '/admin/bookings',
     useRouter: () => ({ push() {}, replace() {}, refresh() {} }),
   },
@@ -71,6 +72,14 @@ const mocks = {
   '@/db': { getD1: () => database, getDb() { throw new Error('unused'); } },
   '@/lib/stripe': { stripeIsConfigured: () => true },
 };
+
+/* ------------------------------------------- canonical Backstage entrypoint */
+
+assert.throws(
+  () => load('app/admin/page.tsx').default(),
+  error => error?.location === '/admin/bookings',
+  '/admin redirects to the Today screen',
+);
 
 function load(relative) {
   const filename = path.resolve(root, relative);

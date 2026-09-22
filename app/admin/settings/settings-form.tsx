@@ -247,7 +247,7 @@ export default function SettingsForm({
           ["handlingBufferMinutes", "Handling buffer", "Minutes after each service", 0, 60],
           ["onlineLeadMinutes", "Online lead time", "Minimum notice in minutes", 0, 1440],
           ["bookingWindowDays", "Booking window", "Days customers can book ahead", 1, 365],
-          ["paymentHoldMinutes", "Online payment hold", "Minutes reserved during checkout", 15, 1440],
+          ["paymentHoldMinutes", "Online payment hold", "Minutes reserved during checkout", 30, 1439],
           ["loyaltyRewardPoints", "Loyalty reward", "Points needed for the reward", 1, 100],
         ] as const).map(([key, label, help, min, max]) => (
           <label className="field" key={key}>

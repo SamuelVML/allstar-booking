@@ -15,7 +15,7 @@ export const bookingSettingsSchema = z.object({
   handlingBufferMinutes: z.number().int().min(0).max(60),
   onlineLeadMinutes: z.number().int().min(0).max(1440),
   bookingWindowDays: z.number().int().min(1).max(365),
-  paymentHoldMinutes: z.number().int().min(15).max(1440),
+  paymentHoldMinutes: z.number().int().min(30).max(1439),
   loyaltyRewardPoints: z.number().int().min(1).max(100),
 }).transform((value, context): BookingSettings => {
   const openingHours: BookingSettings["openingHours"] = {};

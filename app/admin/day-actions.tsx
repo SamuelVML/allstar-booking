@@ -335,6 +335,22 @@ export default function DayActionsProvider({
     });
   }
 
+  function askRetryRefund(appointment: AdminAppointment) {
+    setConfirm({
+      title: "Retry Stripe refund?",
+      body: `Retry the ${formatPrice(appointment.price_cents)} refund for ${appointment.reference}. Stripe idempotency prevents a duplicate refund.`,
+      cta: "Retry refund",
+      run: runConfirmed(
+        operation({
+          action: "retry_refund",
+          reference: appointment.reference,
+          revision: appointment.revision,
+        }),
+        "Stripe refund completed",
+      ),
+    });
+  }
+
   function askMove(appointment: AdminAppointment) {
     setConfirm({
       title: "Move booking?",
@@ -432,11 +448,15 @@ export default function DayActionsProvider({
       setScheduleRevision((value) => value + 1);
       setBlockConflicts([]);
       setSheet(null);
-      showToast(
+      const blockMessage =
         blockScope === "days"
           ? `Vacation blocked · ${result.blockedDays ?? 1} open day${result.blockedDays === 1 ? "" : "s"}${result.cancelledBookings ? ` · ${result.cancelledBookings} booking${result.cancelledBookings === 1 ? "" : "s"} cancelled` : ""}`
-          : `Time off blocked · ${blockStart}–${blockEnd}`,
-        Boolean(result.refundsPending),
+          : `Time off blocked · ${blockStart}–${blockEnd}`;
+      showToast(
+        result.notificationsSent === false
+          ? `${blockMessage} · one or more customer emails failed`
+          : blockMessage,
+        Boolean(result.refundsPending) || result.notificationsSent === false,
       );
       router.refresh();
     } catch (reason) {
@@ -674,6 +694,23 @@ export default function DayActionsProvider({
                 </div>
               </>
             )}
+
+            {selected.status === "cancelled" &&
+              selected.payment_method === "stripe" &&
+              selected.payment_status === "paid" && (
+                <div className="sheet-actions">
+                  <p className="notice">
+                    Stripe has not confirmed this refund. Retry it safely or check the payment in Stripe.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-s"
+                    onClick={() => askRetryRefund(selected)}
+                  >
+                    Retry Stripe refund
+                  </button>
+                </div>
+              )}
 
             {selected.status === "payment_pending" && (
               <p className="notice" style={{ margin: "16px var(--gutter) 0" }}>
