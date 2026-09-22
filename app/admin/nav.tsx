@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   NavCalendar,
@@ -31,10 +30,10 @@ export default function BackstageNav() {
       {TABS.map(({ href, label, Icon }) => {
         const current = pathname === href || pathname.startsWith(`${href}/`);
         return (
-          <Link key={href} href={href} aria-current={current ? "page" : undefined}>
+          <a key={href} href={href} aria-current={current ? "page" : undefined}>
             <Icon />
             {label}
-          </Link>
+          </a>
         );
       })}
     </nav>

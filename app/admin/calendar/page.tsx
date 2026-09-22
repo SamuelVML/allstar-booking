@@ -1,5 +1,4 @@
 import { headers } from "next/headers";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStaffUser } from "@/lib/staff-auth";
 import {
@@ -99,23 +98,23 @@ export default async function CalendarPage({
         <div className="bs-head-row">
           <h1 className="display display-m">Calendar</h1>
           <div className="seg" role="tablist" aria-label="Calendar view">
-            <Link role="tab" aria-selected={view === "day"} href={`/admin/calendar?date=${date}&view=day`}>
+            <a role="tab" aria-selected={view === "day"} href={`/admin/calendar?date=${date}&view=day`}>
               Day
-            </Link>
-            <Link role="tab" aria-selected={view === "week"} href={`/admin/calendar?date=${date}&view=week`}>
+            </a>
+            <a role="tab" aria-selected={view === "week"} href={`/admin/calendar?date=${date}&view=week`}>
               Week
-            </Link>
+            </a>
           </div>
         </div>
 
         <div className="cal-nav">
-          <Link
+          <a
             className="btn-icon"
             aria-label={view === "week" ? "Previous week" : "Previous day"}
             href={`/admin/calendar?date=${shiftDate(date, view === "week" ? -7 : -1)}&view=${view}`}
           >
             <ChevronLeft />
-          </Link>
+          </a>
           <div className="cal-nav-title">
             <strong>
               {view === "week"
@@ -130,13 +129,13 @@ export default async function CalendarPage({
                   : "Closed"}
             </span>
           </div>
-          <Link
+          <a
             className="btn-icon"
             aria-label={view === "week" ? "Next week" : "Next day"}
             href={`/admin/calendar?date=${shiftDate(date, view === "week" ? 7 : 1)}&view=${view}`}
           >
             <ChevronRight />
-          </Link>
+          </a>
         </div>
       </header>
 
@@ -159,7 +158,7 @@ export default async function CalendarPage({
           <>
             <div className="week-grid">
               {weekDays.map((day) => (
-                <Link
+                <a
                   key={day.value}
                   className="week-day"
                   aria-current={day.value === date ? "date" : undefined}
@@ -174,7 +173,7 @@ export default async function CalendarPage({
                     {day.count} {day.count === 1 ? "appt" : "appts"}
                   </span>
                   <span className="open">{day.openLabel}</span>
-                </Link>
+                </a>
               ))}
             </div>
             <p className="muted" style={{ margin: "0 0 12px", fontSize: 12 }}>

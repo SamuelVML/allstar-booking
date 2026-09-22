@@ -115,6 +115,21 @@ function load(relative) {
   return record.exports;
 }
 
+/* -------------------------- navigation must survive Worker client routing */
+
+for (const file of [
+  "app/admin/nav.tsx",
+  "app/admin/bookings/page.tsx",
+  "app/admin/calendar/page.tsx",
+]) {
+  const navigationSource = fs.readFileSync(file, "utf8");
+  assert.doesNotMatch(
+    navigationSource,
+    /from ["']next\\/link["']/,
+    `${file} uses plain same-origin anchors for dependable Worker navigation`,
+  );
+}
+
 /* ---------------------------------------------------------------- fixtures */
 
 const DAY = '2026-09-22'; // A Tuesday: open 10:00–19:00.
