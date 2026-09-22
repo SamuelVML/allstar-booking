@@ -172,9 +172,8 @@ export const COPY = {
     recNone: "No fitting time in the next two weeks — pick a date below.",
     recRestore: "Show Samaritan's recommendation again",
     recTag: "Samaritan's pick",
-    recReasonFirst: "The first open chair for this service — no waiting.",
-    recReasonGap:
-      "Fits neatly between existing appointments, so the shop keeps its rhythm.",
+    recAlternative: "Another option",
+    recTaken: "That time was just taken. Pick another one.",
 
     genericError: "Something went wrong. Please try again.",
   },
@@ -341,9 +340,8 @@ export const COPY = {
     recNone: "Geen passende tijd in de komende twee weken — kies hieronder een datum.",
     recRestore: "Advies van Samaritan opnieuw tonen",
     recTag: "Keuze van Samaritan",
-    recReasonFirst: "De eerste vrije stoel voor deze dienst — geen wachttijd.",
-    recReasonGap:
-      "Past precies tussen bestaande afspraken, zodat de shop zijn ritme houdt.",
+    recAlternative: "Andere optie",
+    recTaken: "Die tijd is net bezet. Kies een andere.",
 
     genericError: "Er ging iets mis. Probeer het opnieuw.",
   },

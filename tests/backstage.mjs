@@ -251,9 +251,14 @@ function appointment(overrides = {}) {
 
 console.log('PASS: payment state, day model, walk-in slots, next up and revenue semantics');
 
-/* ----------------------------------------- availability recommendation reason */
+/* ------------------------------------- recommendation API contract (PR #2) */
+
+// The scoring engine and its cutoffs are covered in tests/booking-management.mjs.
+// What matters here is the contract the UI is wired to: what each audience is
+// allowed to see.
 
 const availability = load('app/api/availability/route.ts');
+const adminRecommendations = load('app/api/admin/recommendations/route.ts');
 
 function blockParent(id, date, start, end) {
   db.prepare('INSERT OR IGNORE INTO time_off (id, date, start_time, end_time, reason, actor_id) VALUES (?, ?, ?, ?, ?, ?)')
@@ -270,57 +275,59 @@ function blockWholeDay(date) {
   }
 }
 
-function blockUntil(date, until) {
-  const id = `partial-${date}`;
-  const hours = booking.getOpeningHours(date);
-  blockParent(id, date, hours.start, until);
-  const statement = db.prepare('INSERT OR IGNORE INTO time_off_slots (slot_start, time_off_id) VALUES (?, ?)');
-  for (let time = hours.start; time < until; time = booking.addMinutes(time, 5)) {
-    statement.run(`${date}T${time}`, id);
-  }
-}
-
 {
   const today = booking.getTodayInEindhoven();
-  const nextDays = [];
-  for (let offset = 0; offset <= 14 && nextDays.length < 3; offset += 1) {
-    const candidate = new Date(`${today}T12:00:00Z`);
-    candidate.setUTCDate(candidate.getUTCDate() + offset);
-    const date = candidate.toISOString().slice(0, 10);
-    if (offset > 0 && booking.getOpeningHours(date)) nextDays.push(date);
-  }
-  const [gapDay, freeDay] = nextDays;
-
-  // Today is closed off entirely so the first recommendation is deterministic.
+  // Today is closed off entirely so the recommendations are deterministic
+  // regardless of the clock the suite runs on.
   blockWholeDay(today);
-  // On the first open day the first three hours are taken, so the earliest
-  // bookable start butts straight onto occupied time. Three hours in is clear
-  // of the scheduled breaks on every opening day.
-  const gapTime = booking.addMinutes(booking.getOpeningHours(gapDay).start, 180);
-  blockUntil(gapDay, gapTime);
 
-  const response = await availability.GET(new Request('https://example.test/api/availability?service=haircut'));
+  const response = await availability.GET(
+    new Request('https://example.test/api/availability?service=haircut'),
+  );
   assert.equal(response.status, 200);
+  assert.match(response.headers.get('cache-control'), /no-store/, 'availability is never cached');
   const result = await response.json();
 
-  assert.equal(result.recommendations[0].date, gapDay);
-  assert.equal(result.recommendations[0].time, gapTime);
+  assert.ok(result.recommendations.length <= 2, 'customers are offered at most two times');
+  assert.ok(result.recommendations.length > 0, 'the fixture leaves days open');
   assert.equal(
-    result.recommendations[0].reason, 'gap',
-    'a slot whose preceding five minutes are taken closes a gap',
+    new Set(result.recommendations.map(entry => entry.date)).size,
+    result.recommendations.length,
+    'the two customer recommendations fall on different dates',
+  );
+  for (const recommendation of result.recommendations) {
+    assert.deepEqual(
+      plain(Object.keys(recommendation).sort()), ['date', 'dateLabel', 'time'],
+      'customers receive a date, a label and a time — never a score or an explanation',
+    );
+    assert.ok(recommendation.date > today, 'today is fully blocked in this fixture');
+  }
+  assert.ok(result.generatedAt && result.validUntil, 'the freshness window is published');
+  assert.ok(
+    new Date(result.validUntil) > new Date(result.generatedAt),
+    'validUntil is after generatedAt',
   );
 
-  const open = result.recommendations.find(entry => entry.date === freeDay);
-  assert.equal(open.time, booking.getOpeningHours(freeDay).start);
-  assert.equal(open.reason, 'first', 'the first chair of an untouched day is not a gap');
-
-  // The date-specific branch is unchanged: still `times`, with no `reason`.
+  // The date-specific branch keeps its shape, plus the freshness fields.
+  const freeDay = result.recommendations[0].date;
   const dayResponse = await availability.GET(
     new Request(`https://example.test/api/availability?service=haircut&date=${freeDay}`),
   );
   const dayResult = await dayResponse.json();
-  assert.deepEqual(plain(Object.keys(dayResult).sort()), ['date', 'service', 'times']);
-  assert.equal(dayResult.times[0], booking.getOpeningHours(freeDay).start);
+  assert.deepEqual(
+    plain(Object.keys(dayResult).sort()),
+    ['date', 'generatedAt', 'service', 'times', 'validUntil'],
+  );
+  assert.ok(dayResult.times.length > 0);
+
+  // Backstage explanations are protected: no staff token, no ranking.
+  const unauthorised = await adminRecommendations.GET(
+    new Request('https://example.test/api/admin/recommendations?service=haircut'),
+  );
+  assert.equal(unauthorised.status, 403, 'Backstage recommendations require a staff token');
+  assert.match(unauthorised.headers.get('cache-control'), /private, no-store/);
+  const refusal = await unauthorised.json();
+  assert.equal(refusal.recommendations, undefined, 'a refusal leaks no ranking');
 }
 
-console.log('PASS: availability recommendations carry an honest reason without changing the existing shape');
+console.log('PASS: customers get two unexplained times, Backstage explanations stay behind staff auth');

@@ -216,6 +216,44 @@ assert.match(output.settings, /Handling buffer/);
 assert.match(output.settings, new RegExp(STAFF.email.replace('.', '\\.')), 'the signed-in staff email is shown');
 assert.ok(!/CF_ACCESS|STRIPE_SECRET|ADMIN_EMAILS/.test(output.settings), 'no configuration is leaked to the page');
 
+/* ------------------------------------- the Samaritan panel's wiring (PR #2) */
+
+{
+  const panel = load('app/admin/samaritan-panel.tsx');
+
+  // The cadence the doc's freshness contract asks for.
+  assert.equal(panel.BACKSTAGE_REFRESH_MS, 30_000, 'Backstage re-ranks every thirty seconds');
+
+  // The panel asks the protected endpoint, scoped to one service and day.
+  assert.equal(
+    panel.recommendationUrl({ serviceId: 'haircut', date: DAY }),
+    '/api/admin/recommendations?service=haircut&date=2026-09-22',
+  );
+  assert.equal(
+    panel.recommendationUrl({ serviceId: 'haircut', date: DAY, colourAddOn: true }),
+    '/api/admin/recommendations?service=haircut&date=2026-09-22&addOn=colour',
+    'the add-on changes the duration the ranking is asked for',
+  );
+  assert.equal(panel.recommendationUrl({ serviceId: '', date: DAY }), null, 'no service, no request');
+  assert.equal(panel.recommendationUrl({ serviceId: 'haircut', date: '' }), null, 'no date, no request');
+  assert.match(
+    panel.recommendationUrl({ serviceId: 'haircut+beard', date: DAY }),
+    /service=haircut%2Bbeard/,
+    'service ids are encoded',
+  );
+
+  // It renders its loading state without a browser and without crashing.
+  const markup = renderToStaticMarkup(
+    React.createElement(panel.default, {
+      serviceId: 'haircut', date: DAY, revision: 0, onPick: () => {},
+    }),
+  );
+  assert.match(markup, /Samaritan recommends/);
+  // Nothing is ranked or scored here — the panel has no data until the server
+  // answers.
+  assert.doesNotMatch(markup, /score/i);
+}
+
 // Every page refuses to render without a staff user, independently of the layout.
 const refuse = { ...mocks['@/lib/staff-auth'] };
 mocks['@/lib/staff-auth'].getStaffUser = async () => null;
@@ -253,4 +291,4 @@ if (process.env.BACKSTAGE_HTML_OUT) {
   console.log(`Wrote ${Object.keys(output).length} HTML renders to ${process.env.BACKSTAGE_HTML_OUT}`);
 }
 
-console.log('PASS: all five Backstage screens render, keep the money wording honest, and refuse unauthenticated visitors');
+console.log('PASS: all five Backstage screens render, Samaritan asks the protected endpoint on the 30s cadence, and every page refuses unauthenticated visitors');

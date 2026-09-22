@@ -17,20 +17,25 @@ import {
   serviceLabel,
 } from "@/lib/i18n";
 import { ArrowLeft, ArrowRight, Check, StarMark } from "@/lib/icons";
+import { useLiveResource } from "@/hooks/use-live-resource";
 import SuccessView, { type Booking } from "./success-view";
 
 const TOTAL_STEPS = 7;
+/** Customer-facing recommendations and availability refresh once a minute. */
+const CUSTOMER_REFRESH_MS = 60_000;
 const BOOKING_WINDOW_DAYS = 60;
 const COLOUR_ADD_ON_MINUTES = 30;
 const COLOUR_ADD_ON_CENTS = 2250;
 const PHONE = "+31686357350";
 
+/**
+ * What a customer is allowed to see. `/api/availability` deliberately withholds
+ * the score and the explanation behind a recommendation — those are Backstage's.
+ */
 type Recommendation = {
   date: string;
   dateLabel: string;
   time: string;
-  /** Additive field from /api/availability; older responses omit it. */
-  reason?: "first" | "gap";
 };
 
 type Confirmation = Booking & {
@@ -158,18 +163,10 @@ export default function BookingForm({
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "stripe">("cash");
   const [touched, setTouched] = useState(false);
 
-  // Both lookups key their result on the request that produced it, so
-  // "loading" is derived from whether the current key has been answered rather
-  // than being a second piece of state to keep in step.
-  const [timesResult, setTimesResult] = useState<{ key: string; times: string[] }>({
-    key: "",
-    times: [],
-  });
-  const [recommendationResult, setRecommendationResult] = useState<{
-    key: string;
-    items: Recommendation[];
-  }>({ key: "", items: [] });
   const [recommendationDismissed, setRecommendationDismissed] = useState(false);
+  // Bumped when a booking attempt changes the schedule, forcing both lookups
+  // to be asked again rather than trusting a cached answer.
+  const [scheduleRevision, setScheduleRevision] = useState(0);
   const [usedRecommendation, setUsedRecommendation] = useState(false);
 
   const [error, setError] = useState("");
@@ -198,67 +195,33 @@ export default function BookingForm({
 
   const timeRange = time ? `${time} – ${addMinutes(time, totalDuration)}` : "";
 
-  const timesKey = date ? `${date}|${serviceId}|${addOn}` : "";
-  const recommendationKey = `${serviceId}|${addOn}`;
-  const loadingTimes = !!date && timesResult.key !== timesKey;
-  const times = timesResult.key === timesKey ? timesResult.times : [];
-  const loadingRecommendation = recommendationResult.key !== recommendationKey;
-  const recommendations = loadingRecommendation ? [] : recommendationResult.items;
-
   /* ---------------------------------------------------------------- data */
 
-  // Available times for the chosen date. Changing the service or add-on keeps
-  // the date and re-checks it rather than throwing the choice away.
-  useEffect(() => {
-    if (!date) return;
-    const controller = new AbortController();
-    const key = `${date}|${serviceId}|${addOn}`;
-    fetch(
-      `/api/availability?date=${encodeURIComponent(date)}&service=${encodeURIComponent(serviceId)}${addOn ? "&addOn=colour" : ""}`,
-      { signal: controller.signal },
-    )
-      .then(async (response) => {
-        const result = (await response.json()) as { times?: string[]; error?: string };
-        if (!response.ok) throw new Error(result.error ?? "Availability failed.");
-        const available = result.times ?? [];
-        setTimesResult({ key, times: available });
-        setTime((current) => (available.includes(current) ? current : ""));
-      })
-      .catch((reason) => {
-        if (reason instanceof Error && reason.name !== "AbortError") {
-          setError(reason.message);
-          // Answer the key so the spinner does not hang; the empty result
-          // surfaces the "fully booked" state with the error alongside it.
-          setTimesResult({ key, times: [] });
-        }
-      });
-    return () => controller.abort();
-  }, [addOn, date, serviceId]);
+  // Both lookups are `/api/availability`. The scoring behind a recommendation
+  // lives on the server; the browser only asks again often enough to stay
+  // honest — every minute, on focus, and after a booking attempt.
+  const addOnQuery = addOn ? "&addOn=colour" : "";
+  const recommendationResource = useLiveResource<{ recommendations?: Recommendation[] }>(
+    `/api/availability?service=${encodeURIComponent(serviceId)}${addOnQuery}`,
+    { intervalMs: CUSTOMER_REFRESH_MS, revision: scheduleRevision },
+  );
+  const timesResource = useLiveResource<{ times?: string[] }>(
+    date
+      ? `/api/availability?date=${encodeURIComponent(date)}&service=${encodeURIComponent(serviceId)}${addOnQuery}`
+      : null,
+    { intervalMs: CUSTOMER_REFRESH_MS, revision: scheduleRevision },
+  );
 
-  // Samaritan's recommendation for the current service.
-  useEffect(() => {
-    const controller = new AbortController();
-    const key = `${serviceId}|${addOn}`;
-    fetch(
-      `/api/availability?service=${encodeURIComponent(serviceId)}${addOn ? "&addOn=colour" : ""}`,
-      { signal: controller.signal },
-    )
-      .then(async (response) => {
-        const result = (await response.json()) as {
-          recommendations?: Recommendation[];
-          error?: string;
-        };
-        if (!response.ok) throw new Error(result.error ?? "Recommendation failed.");
-        setRecommendationResult({ key, items: result.recommendations ?? [] });
-      })
-      .catch((reason) => {
-        if (reason instanceof Error && reason.name !== "AbortError") {
-          setError(reason.message);
-          setRecommendationResult({ key, items: [] });
-        }
-      });
-    return () => controller.abort();
-  }, [addOn, serviceId]);
+  const recommendations = recommendationResource.data?.recommendations ?? [];
+  const loadingRecommendation = recommendationResource.loading;
+  const times = timesResource.data?.times ?? [];
+  const loadingTimes = timesResource.loading;
+  const lookupError = recommendationResource.error || timesResource.error;
+
+  // A slot can be taken while the customer is still deciding. Rather than
+  // silently dropping their choice, say so and stop them confirming it.
+  const timeTaken =
+    !!time && !loadingTimes && !!timesResource.data && !times.includes(time);
 
   // Preserved: the booking surface stays available to model-driven clients
   // through document.modelContext.
@@ -354,7 +317,7 @@ export default function BookingForm({
   const detailsValid = nameValid && phoneValid && emailValid && acceptedTerms;
   const invalid = (ok: boolean) => touched && !ok;
 
-  const stepValid = [true, true, !!date, !!time, detailsValid, true, true, true][step];
+  const stepValid = [true, true, !!date, !!time && !timeTaken, detailsValid, true, !timeTaken, true][step];
 
   /* --------------------------------------------------------------- actions */
 
@@ -430,9 +393,12 @@ export default function BookingForm({
       setConfirmation(result.booking);
     } catch (reason) {
       // Everything entered is still in state — step 6 comes back exactly as it
-      // was left, with a retry.
+      // was left, with a retry. The attempt may have raced another booking, so
+      // availability and the recommendations are asked again rather than
+      // retried against a stale answer.
       setStep(6);
       setError(reason instanceof Error ? reason.message : "Booking failed.");
+      setScheduleRevision((value) => value + 1);
     }
   }
 
@@ -503,6 +469,8 @@ export default function BookingForm({
   const noTimes = !!date && !loadingTimes && times.length === 0;
 
   const recommendation = recommendations[0];
+  // `/api/availability` returns at most two, always on different dates.
+  const alternative = recommendations[1];
   const showRecommendation = step === 2 && !recommendationDismissed && !date;
 
   const consents = [
@@ -668,9 +636,6 @@ export default function BookingForm({
                           · {totalDuration} min
                         </span>
                       </div>
-                      <p className="reason pretty">
-                        {recommendation.reason === "gap" ? t.recReasonGap : t.recReasonFirst}
-                      </p>
                       <div className="samaritan-actions">
                         <button
                           type="button"
@@ -688,6 +653,18 @@ export default function BookingForm({
                           {t.recDismiss}
                         </button>
                       </div>
+                      {alternative && (
+                        <button
+                          type="button"
+                          className="samaritan-alt"
+                          onClick={() => acceptRecommendation(alternative)}
+                        >
+                          <span className="eyebrow">{t.recAlternative}</span>
+                          <span className="alt-when">
+                            {alternative.dateLabel} <b>{alternative.time}</b>
+                          </span>
+                        </button>
+                      )}
                     </>
                   )}
                   {!loadingRecommendation && !recommendation && (
@@ -789,6 +766,16 @@ export default function BookingForm({
                   <span className="spinner" aria-hidden="true" />
                   {t.checkingTimes}
                 </div>
+              )}
+              {timeTaken && (
+                <p className="notice" role="alert" style={{ marginBottom: 14, color: "var(--red)" }}>
+                  {t.recTaken}
+                </p>
+              )}
+              {lookupError && (
+                <p className="notice" role="alert" style={{ marginBottom: 14 }}>
+                  {lookupError}
+                </p>
               )}
               {!loadingTimes && noTimes && (
                 <div className="empty-state">
@@ -1037,6 +1024,20 @@ export default function BookingForm({
                 <span>{t.loyaltyReview}</span>
               </p>
 
+              {timeTaken && (
+                <div className="alert" role="alert" style={{ marginTop: 16 }}>
+                  <strong>{t.recTaken}</strong>
+                  <div className="alert-actions">
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-s"
+                      onClick={() => goTo(3)}
+                    >
+                      {t.pickAnotherDate}
+                    </button>
+                  </div>
+                </div>
+              )}
               {error && (
                 <div className="alert" role="alert" style={{ marginTop: 16 }}>
                   <strong>{t.failTitle}</strong>

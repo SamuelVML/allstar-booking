@@ -16,6 +16,7 @@ import {
   TONE_COLOR,
 } from "@/lib/backstage-view";
 import { ArrowLeft, Check, Close } from "@/lib/icons";
+import SamaritanPanel from "./samaritan-panel";
 
 const BOOKABLE = SERVICES.filter((service) => !service.isAddOn);
 const RESCHEDULE_DAYS = 14;
@@ -50,6 +51,22 @@ export function useDayActions() {
   const value = useContext(DayActionsContext);
   if (!value) throw new Error("useDayActions must be used inside DayActionsProvider");
   return value;
+}
+
+/**
+ * Samaritan ranks every five-minute opening, while the grids step by fifteen —
+ * the rhythm the barber books to. If a picked recommendation falls between grid
+ * steps, add it so the choice is visible and selected. It came from the
+ * server's ranked list, so it is bookable; the mutation revalidates it anyway.
+ */
+function withPickedTime(
+  slots: Array<{ time: string; available: boolean }>,
+  picked: string,
+) {
+  if (!picked || slots.some((slot) => slot.time === picked)) return slots;
+  return [...slots, { time: picked, available: true }].sort((a, b) =>
+    a.time.localeCompare(b.time),
+  );
 }
 
 function longDate(date: string) {
@@ -90,6 +107,9 @@ export default function DayActionsProvider({
   const [sheet, setSheet] = useState<Sheet>(null);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [busy, setBusy] = useState(false);
+  // Bumped after every schedule mutation so Samaritan re-ranks against the
+  // day as it now stands.
+  const [scheduleRevision, setScheduleRevision] = useState(0);
   const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null);
 
   // Add sheet
@@ -173,6 +193,7 @@ export default function DayActionsProvider({
       setBusy(true);
       try {
         const result = await request();
+        setScheduleRevision((value) => value + 1);
         setConfirm(null);
         setSheet(null);
         if (result.notificationsSent === false) {
@@ -301,14 +322,17 @@ export default function DayActionsProvider({
 
   const walkInServiceRecord =
     BOOKABLE.find((service) => service.id === walkInService) ?? BOOKABLE[0];
-  const walkInSlots = staffSlots(
-    date,
-    walkInServiceRecord.durationMinutes,
-    appointments,
-    blocks,
-    // Staff can start now — there is no one-hour online lead time — but not in
-    // the past.
-    date === today ? { from: now } : {},
+  const walkInSlots = withPickedTime(
+    staffSlots(
+      date,
+      walkInServiceRecord.durationMinutes,
+      appointments,
+      blocks,
+      // Staff can start now — there is no one-hour online lead time — but not
+      // in the past.
+      date === today ? { from: now } : {},
+    ),
+    walkInTime,
   );
   const walkInReady = walkInName.trim().length > 0 && walkInTime.length > 0;
   const blockReady =
@@ -326,6 +350,7 @@ export default function DayActionsProvider({
         name: walkInName.trim(),
         notes: walkInNotes.trim(),
       });
+      setScheduleRevision((value) => value + 1);
       setSheet(null);
       showToast(`Walk-in added · ${walkInTime}`);
       router.refresh();
@@ -347,6 +372,7 @@ export default function DayActionsProvider({
         end: blockEnd,
         reason: blockReason.trim(),
       });
+      setScheduleRevision((value) => value + 1);
       setSheet(null);
       showToast(`Time off blocked · ${blockStart}–${blockEnd}`);
       router.refresh();
@@ -412,13 +438,16 @@ export default function DayActionsProvider({
 
   const moveSlots =
     selected && moveDate
-      ? staffSlots(moveDate, durationOf(selected), [], [], {}).map((slot) => ({
-          time: slot.time,
-          // The server is the authority on availability for another day.
-          available:
-            moveTimes.includes(slot.time) &&
-            !(moveDate === selected.appointment_date && slot.time === selected.start_time),
-        }))
+      ? withPickedTime(
+          staffSlots(moveDate, durationOf(selected), [], [], {}).map((slot) => ({
+            time: slot.time,
+            // The server is the authority on availability for another day.
+            available:
+              moveTimes.includes(slot.time) &&
+              !(moveDate === selected.appointment_date && slot.time === selected.start_time),
+          })),
+          moveTime,
+        )
       : [];
 
   /* ------------------------------------------------------------ rendering */
@@ -679,6 +708,16 @@ export default function DayActionsProvider({
                 ))}
               </div>
 
+              {moveDate && (
+                <SamaritanPanel
+                  serviceId={selected.service_id}
+                  date={moveDate}
+                  revision={scheduleRevision}
+                  selectedTime={moveTime}
+                  onPick={setMoveTime}
+                />
+              )}
+
               <p className="eyebrow" style={{ margin: "16px 0 8px" }}>
                 Available time · {moveDate ? shortDate(moveDate) : "pick a date"}
               </p>
@@ -811,6 +850,14 @@ export default function DayActionsProvider({
                       </button>
                     ))}
                   </div>
+
+                  <SamaritanPanel
+                    serviceId={walkInService}
+                    date={date}
+                    revision={scheduleRevision}
+                    selectedTime={walkInTime}
+                    onPick={setWalkInTime}
+                  />
 
                   <p className="eyebrow" style={{ margin: "14px 0 6px" }}>
                     Start time · {walkInServiceRecord.durationMinutes} min +{" "}

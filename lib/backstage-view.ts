@@ -18,6 +18,7 @@ export type AdminAppointment = {
   revision: number;
   source: string;
   customer_account_id: string | null;
+  service_id: string;
   service_name: string;
   price_cents: number;
   appointment_date: string;
