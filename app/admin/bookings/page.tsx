@@ -1,5 +1,4 @@
 import { headers } from "next/headers";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStaffUser } from "@/lib/staff-auth";
 import {
@@ -98,20 +97,20 @@ export default async function TodayPage({
             <p>{daySubtitle}</p>
           </div>
           <div className="day-nav-buttons">
-            <Link
+            <a
               className="btn-icon"
               aria-label="Previous day"
               href={`/admin/bookings?date=${shiftDate(date, -1)}`}
             >
               <ChevronLeft />
-            </Link>
-            <Link
+            </a>
+            <a
               className="btn-icon"
               aria-label="Next day"
               href={`/admin/bookings?date=${shiftDate(date, 1)}`}
             >
               <ChevronRight />
-            </Link>
+            </a>
           </div>
         </div>
 
