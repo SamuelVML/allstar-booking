@@ -14,6 +14,36 @@ export type BookingConfirmation = {
   paymentMethod: "Paid online" | "Pay at the shop";
 };
 
+const RESEND_MAX_ATTEMPTS = 3;
+const RESEND_RETRY_DELAYS_MS = [300, 900];
+
+function retryableResendStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
+async function sendResendRequest(options: RequestInit) {
+  let lastResponse: Response | undefined;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < RESEND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch("https://api.resend.com/emails", options);
+      if (response.ok || !retryableResendStatus(response.status)) return response;
+      lastResponse = response;
+    } catch (error) {
+      lastError = error;
+    }
+
+    const delay = RESEND_RETRY_DELAYS_MS[attempt];
+    if (delay !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  if (lastResponse) return lastResponse;
+  throw lastError instanceof Error ? lastError : new Error("Resend request failed");
+}
+
 export async function sendBookingConfirmation(booking: BookingConfirmation) {
   // Independent requests: a failure for one recipient must not suppress the other.
   const [customer, admin] = await Promise.allSettled([
@@ -47,7 +77,7 @@ async function sendAdminNotification(booking: BookingConfirmation) {
     ["Payment", booking.paymentMethod],
     ["Reference", booking.reference],
   ];
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await sendResendRequest({
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -78,7 +108,7 @@ async function sendCustomerConfirmation(booking: BookingConfirmation) {
     return false;
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await sendResendRequest({
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -177,7 +207,7 @@ export async function sendBookingChangeNotification(
   ].join("\n");
   const recipients = [booking.customer_email, env.BOOKING_ADMIN_EMAIL?.trim()].filter((value): value is string => Boolean(value));
   const outcomes = await Promise.allSettled(recipients.map(async (to, index) => {
-    const response = await fetch("https://api.resend.com/emails", {
+    const response = await sendResendRequest({
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `booking-change/${changeId}/${index}` },
       body: JSON.stringify({ from, to: [to], subject, text,
