@@ -72,6 +72,13 @@ const mocks = {
   '@/lib/stripe': { stripeIsConfigured: () => true },
 };
 
+// Pin the fixture clock before the 13:30 booking so this assertion does not
+// depend on the wall-clock time at which CI happens to run.
+class FixtureDate extends Date {
+  constructor(...args) { super(...(args.length ? args : ["2026-09-22T10:00:00Z"])); }
+  static now() { return new Date("2026-09-22T10:00:00Z").getTime(); }
+}
+
 function load(relative) {
   const filename = path.resolve(root, relative);
   if (loaded.has(filename)) return loaded.get(filename).exports;
@@ -109,7 +116,7 @@ function load(relative) {
   vm.runInNewContext(code, {
     module: record, exports: record.exports, require: resolve,
     console, crypto, URL, URLSearchParams, Request, Response, Headers,
-    Date, Error, Intl, Set, Map, Math, JSON, Array, Object, String, Number, Boolean, Promise,
+    Date: FixtureDate, Error, Intl, Set, Map, Math, JSON, Array, Object, String, Number, Boolean, Promise,
     React, process, setTimeout, clearTimeout,
   }, { filename });
   return record.exports;

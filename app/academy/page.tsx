@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { ArrowRight, StarMark } from "@/lib/icons";
 
 export const metadata: Metadata = {
@@ -7,29 +6,37 @@ export const metadata: Metadata = {
   description: "Practical barber education in Eindhoven: beginner training, fade masterclasses, 1-to-1 coaching and tailored team training.",
 };
 
-const programmes = [
+const englishProgrammes = [
   { title: "Barber Program", meta: "30 weeks · complete beginners", body: "A structured route from first principles to confident, job-ready barbering. Learn fundamentals, modern techniques, client consultation and professional shop workflow, with practice between sessions." },
   { title: "Fade Masterclass", meta: "Advanced technique", body: "Focused training for barbers who want cleaner transitions, stronger shape and a more repeatable fade process." },
   { title: "1-to-1 Coaching", meta: "Personal coaching", body: "Individual coaching built around your current level, technique and development goals, with direct feedback and practical correction." },
   { title: "Custom Team Training", meta: "Salons & teams", body: "Tailored sessions for barber and salon teams, designed around the techniques, standards and workflow your team needs to improve." },
 ];
 
+const dutchProgrammes = [
+  { title: "Barberopleiding", meta: "30 weken · voor beginners", body: "Een gestructureerd traject van de basis naar zelfstandig werken als barbier. Leer technieken, klantadvies en de dagelijkse werkwijze in de barbershop, met oefening tussen de lessen." },
+  { title: "Fade Masterclass", meta: "Gevorderde technieken", body: "Gerichte training voor barbiers die strakkere overgangen, een betere vorm en een consistent fade-proces willen ontwikkelen." },
+  { title: "1-op-1 coaching", meta: "Persoonlijke begeleiding", body: "Individuele coaching afgestemd op jouw niveau, techniek en leerdoelen, met directe feedback en praktische correcties." },
+  { title: "Teamtraining op maat", meta: "Salons & teams", body: "Training voor barber- en salonteams, afgestemd op de technieken, kwaliteit en werkwijze die jullie willen verbeteren." },
+];
+
 export default async function AcademyPage({ searchParams }: { searchParams: Promise<{ lang?: string }> }) {
   const { lang } = await searchParams;
   const nl = lang === "nl";
-  return <main className="site academy-page">
+  const programmes = nl ? dutchProgrammes : englishProgrammes;
+  return <main className="site academy-page" lang={nl ? "nl" : "en"}>
     <header className="site-top">
-      <Link className="brand" href={nl ? "/?lang=nl" : "/"}><StarMark /><span className="brand-name"><b>ALL STAR</b><span>ACADEMY · EINDHOVEN</span></span></Link>
-      <Link className="btn btn-on-dark btn-s" href={nl ? "/?lang=nl" : "/"}>{nl ? "Terug naar All Star" : "Back to All Star"}</Link>
+      <a className="brand" href={nl ? "/?lang=nl" : "/"}><StarMark /><span className="brand-name"><b>ALL STAR</b><span>ACADEMY · EINDHOVEN</span></span></a>
+      <a className="btn btn-on-dark btn-s" href={nl ? "/?lang=nl" : "/"}>{nl ? "Terug naar All Star" : "Back to All Star"}</a>
     </header>
     <section className="academy-hero">
-      <div><p className="kicker">All Star Academy</p><h1 className="display display-xl">Learn the craft.</h1><p className="lead pretty">Practical, results-driven barber education — from complete beginner training to advanced skill courses, personal coaching and tailored team training.</p></div>
-      <img src="/academy-training.webp" alt="Barber instructor demonstrating a fade technique to students" />
+      <div><p className="kicker">All Star Academy</p><h1 className="display display-xl">{nl ? "Leer het vak." : "Learn the craft."}</h1><p className="lead pretty">{nl ? "Praktische barberopleidingen — van een complete beginnersopleiding tot verdiepende cursussen, persoonlijke coaching en teamtraining op maat." : "Practical, results-driven barber education — from complete beginner training to advanced skill courses, personal coaching and tailored team training."}</p></div>
+      <img src="/academy-training.webp" alt={nl ? "Barberdocent demonstreert een fade-techniek aan cursisten" : "Barber instructor demonstrating a fade technique to students"} />
     </section>
     <section className="section academy-intro">
-      <p className="kicker">Training · Courses · Coaching</p>
-      <h2 className="display display-m">Built around real shop work.</h2>
-      <p className="body pretty">Training is practical and structured around technique, workflow, confidence and repeatable progress. Choose the route that matches where you are now and where you want to go.</p>
+      <p className="kicker">{nl ? "Opleidingen · Cursussen · Coaching" : "Training · Courses · Coaching"}</p>
+      <h2 className="display display-m">{nl ? "Leren vanuit de praktijk." : "Built around real shop work."}</h2>
+      <p className="body pretty">{nl ? "Onze trainingen draaien om techniek, werkwijze, vertrouwen en blijvende vooruitgang. Kies het traject dat past bij jouw niveau en ambities." : "Training is practical and structured around technique, workflow, confidence and repeatable progress. Choose the route that matches where you are now and where you want to go."}</p>
     </section>
     <section className="academy-program-grid">
       {programmes.map((p, i) => <article className="academy-program" key={p.title}>
@@ -38,10 +45,10 @@ export default async function AcademyPage({ searchParams }: { searchParams: Prom
       </article>)}
     </section>
     <section className="section section-dark academy-contact">
-      <p className="kicker kicker-on-dark">Start a conversation</p>
-      <h2 className="display display-m">Train at All Star.</h2>
-      <p>Tell us which programme you are interested in and your current experience level. We will help you find the appropriate route.</p>
-      <a className="btn btn-on-dark" href="mailto:info@all-star-barbershop.com?subject=All%20Star%20Academy%20enquiry">Academy enquiry <ArrowRight /></a>
+      <p className="kicker kicker-on-dark">{nl ? "Neem contact op" : "Start a conversation"}</p>
+      <h2 className="display display-m">{nl ? "Leer bij All Star." : "Train at All Star."}</h2>
+      <p>{nl ? "Vertel ons welke opleiding je aanspreekt en hoeveel ervaring je hebt. We helpen je een passend traject te vinden." : "Tell us which programme you are interested in and your current experience level. We will help you find the appropriate route."}</p>
+      <a className="btn btn-on-dark" href="mailto:info@all-star-barbershop.com?subject=All%20Star%20Academy%20enquiry">{nl ? "Vraag over de Academy" : "Academy enquiry"} <ArrowRight /></a>
     </section>
   </main>;
 }

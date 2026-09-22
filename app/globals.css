@@ -1073,3 +1073,9 @@ textarea.input { padding: 12px 14px; min-height: 76px; resize: vertical; font-si
   .academy-program { padding: 42px 7vw; }
   .academy-intro, .academy-contact { padding-left: 7vw; padding-right: 7vw; }
 }
+
+.academy-page .site-top { flex-wrap: wrap; }
+.academy-page .brand { min-height: 44px; }
+.academy-hero > div { min-width: 0; }
+.academy-page .display { overflow-wrap: anywhere; }
+.launch-consent { min-height: 44px; align-items: center; }

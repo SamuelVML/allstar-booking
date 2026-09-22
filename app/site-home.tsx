@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import LaunchListForm from "./launch-list-form";
-import Link from "next/link";
 import { formatPrice, OPENING_HOURS, SERVICES } from "@/lib/booking";
 import { COPY, type Language, serviceLabel } from "@/lib/i18n";
 import { ArrowRight, StarMark } from "@/lib/icons";
@@ -84,7 +83,7 @@ export default function SiteHome({
         </div>
         <div>
           {bookable.map((service, index) => (
-            <Link
+            <a
               key={service.id}
               href={bookHref(service.id)}
               className="service-row"
@@ -97,7 +96,7 @@ export default function SiteHome({
                 <small>{service.durationMinutes} min</small>
               </span>
               <b>{formatPrice(service.priceCents)}</b>
-            </Link>
+            </a>
           ))}
         </div>
         <p className="muted" style={{ margin: "14px 0 0", fontSize: 13 }}>
@@ -175,10 +174,10 @@ export default function SiteHome({
                 <span key={programme}>{programme}</span>
               ))}
             </div>
-            <Link className="btn btn-outline" href={language === "nl" ? "/academy?lang=nl" : "/academy"}>
+            <a className="btn btn-outline" href={language === "nl" ? "/academy?lang=nl" : "/academy"}>
               {t.academyCta}
               <ArrowRight />
-            </Link>
+            </a>
           </div>
         </div>
       </section>
@@ -236,10 +235,10 @@ export default function SiteHome({
       </footer>
 
       <div className="sticky-bar">
-        <Link className="btn btn-primary btn-block" href={bookHref()}>
+        <a className="btn btn-primary btn-block" href={bookHref()}>
           {t.bookCta}
           <ArrowRight />
-        </Link>
+        </a>
       </div>
     </div>
   );

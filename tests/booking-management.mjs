@@ -39,10 +39,10 @@ const mockedJose = { ...jose, createRemoteJWKSet(url, options) {
 function load(relative) {
   const filename = path.resolve(root, relative);
   if (modules.has(filename)) return modules.get(filename).exports;
-  const module = { exports: {} }; modules.set(filename, module);
+  const loadedModule = { exports: {} }; modules.set(filename, loadedModule);
   const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(code, {
-    module, exports: module.exports, console, crypto, URL, Request, Response, Headers, Date, Error,
+    module: loadedModule, exports: loadedModule.exports, console, crypto, URL, Request, Response, Headers, Date, Error,
     fetch: async () => { throw new Error('No external requests in tests'); },
     require(name) {
       if (name === 'cloudflare:workers') return { env };
@@ -53,7 +53,7 @@ function load(relative) {
       return require(name);
     },
   }, { filename });
-  return module.exports;
+  return loadedModule.exports;
 }
 const auth = load('lib/staff-auth.ts');
 const management = load('lib/booking-management.ts');
