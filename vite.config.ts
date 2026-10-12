@@ -14,8 +14,11 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const managedLinux = readExecutionProfile() === "managed-linux";
 
 const localBindingConfig = {
-  main: "vinext/server/fetch-handler",
+  // Delegates requests to vinext and adds the Bookly background sync.
+  main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  // Every minute; see BOOKLY_MAX_OCCUPANCY_AGE_SECONDS in lib/bookly.ts.
+  triggers: { crons: ["* * * * *"] },
   d1_databases: d1
     ? [
         {

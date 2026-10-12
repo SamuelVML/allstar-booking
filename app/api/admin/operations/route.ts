@@ -1,4 +1,4 @@
-import { synchronizeBookly } from "@/lib/bookly";
+import { assertBooklyFresh, pushAfterCommit } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Check the form fields and try again." }, { status: 400 });
   try {
     const database = getD1();
-    await synchronizeBookly(database);
+    await assertBooklyFresh(database);
     const stored = await readBookingSettings(database);
     const input = parsed.data;
     if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
@@ -93,7 +93,6 @@ export async function POST(request: Request) {
         const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
         cancelled.push({ booking, changeId: change.changeId });
       }
-      await synchronizeBookly(database);
       let refundsPending = 0;
       let notificationsSent = true;
       for (const { booking, changeId } of cancelled) {
@@ -110,9 +109,10 @@ export async function POST(request: Request) {
             )) && notificationsSent;
         }
       }
-      await synchronizeBookly(database);
+      const calendar = await pushAfterCommit(database, null);
       return Response.json({
         saved: true,
+        calendar,
         blockedDays,
         cancelledBookings: conflicts.length,
         refundsPending,
@@ -141,8 +141,8 @@ export async function POST(request: Request) {
       const refundStatus = await refundCancelledBooking(database, booking, user.id);
       return Response.json({ saved: true, refundStatus });
     }
-    await synchronizeBookly(database);
-    return Response.json({ saved: true });
+    const calendar = await pushAfterCommit(database, null);
+    return Response.json({ saved: true, calendar });
   } catch (error) {
     if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
     console.error("Backstage operation failed");

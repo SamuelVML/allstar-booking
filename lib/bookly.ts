@@ -4,7 +4,7 @@
  */
 import { env } from "cloudflare:workers";
 import { z } from "zod";
-import { addMinutes, dateIsValid, makeSlotKeys } from "@/lib/booking";
+import { addMinutes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
 import { refundCancelledBooking } from "@/lib/refunds";
 import type { ManagedBooking } from "@/lib/booking-management";
 
@@ -13,6 +13,29 @@ const environment = () => env as unknown as BridgeEnv;
 export function booklyEnabled() { return environment().BOOKLY_SYNC_ENABLED === "true"; }
 export class BooklyUnavailable extends Error {}
 export class BooklyConflict extends BooklyUnavailable {}
+
+/** Imported Bookly occupancy older than this is treated as unknown. Background
+ * synchronization runs every minute (Worker Cron Trigger, plus the WordPress
+ * callback), so three missed runs close customer availability and new bookings
+ * until a snapshot succeeds. Live per-day Bookly checks still run on every
+ * availability read and booking; this bound covers a broken background path.
+ */
+export const BOOKLY_MAX_OCCUPANCY_AGE_SECONDS = 180;
+
+export async function booklyOccupancyAgeSeconds(database: D1Database, now = Date.now()) {
+  const state = await database.prepare("SELECT last_success FROM bookly_sync_state WHERE id=1").first<{ last_success: string | null }>();
+  const success = state?.last_success ? Date.parse(state.last_success) : NaN;
+  return Number.isFinite(success) ? Math.max(0, Math.floor((now - success) / 1000)) : null;
+}
+
+/** Fail closed when the imported Bookly occupancy is missing or stale. */
+export async function assertBooklyFresh(database: D1Database) {
+  if (!booklyEnabled()) return;
+  const age = await booklyOccupancyAgeSeconds(database);
+  if (age === null || age > BOOKLY_MAX_OCCUPANCY_AGE_SECONDS) {
+    throw new BooklyUnavailable("Calendar availability is out of date. Try again shortly.");
+  }
+}
 
 const remoteSchema = z.object({
   remoteId: z.string().regex(/^\d+$/), localId: z.string().nullable(), kind: z.enum(["appointment", "block"]),
@@ -94,40 +117,128 @@ async function enqueue(database: D1Database, localId: string, kind: "appointment
     .bind(command.id, localId, JSON.stringify(command), localDigest).run();
 }
 
+type TimeOffRow = { id: string; date: string; start_time: string; end_time: string; reason: string; removed_at: string | null };
+type CommandRow = { id: string; local_id: string; payload: string; digest: string };
+
+function blockState(block: TimeOffRow): State {
+  const duration = (Number(block.end_time.slice(0,2))-Number(block.start_time.slice(0,2)))*60 + Number(block.end_time.slice(3))-Number(block.start_time.slice(3));
+  return { serviceId:"", date:block.date,time:block.start_time,durationMinutes:duration,handlingMinutes:0,
+    status:block.removed_at ? "removed":"confirmed", customerName:"Shop time off",customerEmail:"",customerPhone:"",notes:block.reason,paymentStatus:"not_applicable" };
+}
+
+/** Which local records may be written to Bookly. Linked records always follow
+ * their Bookly twin. Unlinked records are exported only when they still occupy
+ * today or a future day, so activation never recreates history in Bookly:
+ * past appointments of any status, cancelled/expired/completed rows and past or
+ * removed time off stay local. Bookly-origin rows are never echoed back.
+ */
+function exportableAppointment(row: Row, link: Link | undefined, today: string) {
+  if (row.source === "bookly" || link?.remote_version === "deleted") return null;
+  if (!link && (["cancelled","payment_expired","completed"].includes(row.status) || row.appointment_date < today)) return null;
+  return stateOf(row);
+}
+function exportableBlock(block: TimeOffRow, link: Link | undefined, today: string) {
+  if (!link && (block.removed_at || block.date < today)) return null;
+  return blockState(block);
+}
+
+async function enqueueLocal(database: D1Database, localIds: string[] | null, today: string) {
+  const links = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
+  const linkOf = (localId: string) => links.find(item => item.local_id === localId);
+  const wanted = localIds ? new Set(localIds) : null;
+  const rows = (await database.prepare("SELECT * FROM appointments WHERE source != 'bookly'").all<Row>()).results;
+  for (const row of rows) {
+    if (wanted && !wanted.has(row.id)) continue;
+    const state = exportableAppointment(row, linkOf(row.id), today);
+    if (state) await enqueue(database, row.id, "appointment", state, linkOf(row.id));
+  }
+  const blocks = (await database.prepare("SELECT * FROM time_off").all<TimeOffRow>()).results;
+  for (const block of blocks) {
+    const localId = `block-${block.id}`;
+    if (wanted && !wanted.has(localId)) continue;
+    const state = exportableBlock(block, linkOf(localId), today);
+    if (state) await enqueue(database, localId, "block", state, linkOf(localId));
+  }
+}
+
+/** Deliver one stored command. Safe to call concurrently for the same row: the
+ * plugin keys idempotency on the command ID and payload hash, so a second
+ * delivery returns the original receipt instead of writing twice.
+ */
+async function sendCommand(database: D1Database, row: CommandRow) {
+  try {
+    const command = JSON.parse(row.payload) as Command;
+    const result = z.object({ remoteId: z.string().regex(/^\d+$/).nullable(), version: z.string(), terminal: z.boolean().optional() })
+      .parse(await booklyRequest("command", command));
+    if (result.remoteId && !/^[a-f0-9]{64}$/.test(result.version)) throw new BooklyUnavailable("Invalid Bookly command receipt.");
+    const statements = [database.prepare("UPDATE bookly_commands SET status = 'done', error = NULL WHERE id = ?").bind(row.id)];
+    if (result.remoteId) statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) VALUES (?,?,?,?,?)
+      ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
+      .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind));
+    await database.batch(statements);
+  } catch (error) {
+    const command = JSON.parse(row.payload) as Command;
+    if (error instanceof BooklyConflict && command.kind === "appointment" && !command.expectedVersion) {
+      const booking = await database.prepare("SELECT source,booking_request_id,payment_status FROM appointments WHERE id=?").bind(row.local_id)
+        .first<{ source: string; booking_request_id: string | null; payment_status: string }>();
+      if (booking && (booking.booking_request_id || booking.source === "walk_in") && booking.payment_status !== "paid") {
+        await database.batch([
+          database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=?").bind(row.local_id),
+          database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(row.local_id),
+          database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=?").bind(row.id),
+        ]);
+      }
+    }
+    await database.prepare("UPDATE bookly_commands SET error = ? WHERE id = ?").bind(error instanceof BooklyConflict ? "conflict" : "unavailable", row.id).run();
+    throw error;
+  }
+}
+
 async function drain(database: D1Database, lease: string) {
   const rows = (await database.prepare("SELECT * FROM bookly_commands WHERE status = 'pending' ORDER BY (json_extract(payload,'$.kind') = 'block'), created_at, id LIMIT 101")
-    .all<{ id: string; local_id: string; payload: string; digest: string }>()).results;
+    .all<CommandRow>()).results;
   if (rows.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Run the staff sync before accepting more bookings.");
   for (const row of rows) {
     const renewed = await database.prepare("UPDATE bookly_sync_state SET lease_until=? WHERE id=1 AND lease=? AND lease_until > ?")
       .bind(Date.now()+120_000,lease,Date.now()).run();
     if (renewed.meta.changes !== 1) throw new BooklyUnavailable("Calendar sync lease expired.");
-    try {
-      const command = JSON.parse(row.payload) as Command;
-      const result = z.object({ remoteId: z.string().regex(/^\d+$/).nullable(), version: z.string(), terminal: z.boolean().optional() })
-        .parse(await booklyRequest("command", command));
-      if (result.remoteId && !/^[a-f0-9]{64}$/.test(result.version)) throw new BooklyUnavailable("Invalid Bookly command receipt.");
-      const statements = [database.prepare("UPDATE bookly_commands SET status = 'done', error = NULL WHERE id = ?").bind(row.id)];
-      if (result.remoteId) statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) VALUES (?,?,?,?,?)
-        ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
-        .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind));
-      await database.batch(statements);
-    } catch (error) {
-      const command = JSON.parse(row.payload) as Command;
-      if (error instanceof BooklyConflict && command.kind === "appointment" && !command.expectedVersion) {
-        const booking = await database.prepare("SELECT source,booking_request_id,payment_status FROM appointments WHERE id=?").bind(row.local_id)
-          .first<{ source: string; booking_request_id: string | null; payment_status: string }>();
-        if (booking && (booking.booking_request_id || booking.source === "walk_in") && booking.payment_status !== "paid") {
-          await database.batch([
-            database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=?").bind(row.local_id),
-            database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(row.local_id),
-            database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=?").bind(row.id),
-          ]);
-        }
-      }
-      await database.prepare("UPDATE bookly_commands SET error = ? WHERE id = ?").bind(error instanceof BooklyConflict ? "conflict" : "unavailable", row.id).run();
-      throw error;
-    }
+    await sendCommand(database, row);
+  }
+}
+
+/** Write local changes to Bookly without taking a snapshot or the sync lease.
+ * Used on request paths: a website booking is pushed before checkout, so Bookly
+ * (which serializes writes with a MySQL named lock) rejects a slot taken there
+ * since the last snapshot; the rejected hold is cancelled locally and the
+ * caller gets BooklyConflict. BooklyUnavailable leaves the command pending for
+ * background replay. `localIds` limits the push; null pushes every change.
+ */
+export async function pushBooklyChanges(database: D1Database, localIds: string[] | null) {
+  if (!booklyEnabled()) return;
+  const today = getTodayInEindhoven();
+  // A pending command for the same record blocks a newer one (unique index),
+  // so deliver, then enqueue again until the stored state is current.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await enqueueLocal(database, localIds, today);
+    const pending = (await database.prepare("SELECT * FROM bookly_commands WHERE status = 'pending' ORDER BY (json_extract(payload,'$.kind') = 'block'), created_at, id LIMIT 101")
+      .all<CommandRow>()).results.filter(row => !localIds || localIds.includes(row.local_id));
+    if (!pending.length) return;
+    if (pending.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Run the staff sync before accepting more bookings.");
+    for (const row of pending) await sendCommand(database, row);
+  }
+}
+
+/** For committed staff changes: refunds and notifications must still run, so
+ * delivery problems are reported instead of thrown. Pending commands replay in
+ * the background; conflicts stay visible at GET /api/admin/bookly.
+ */
+export async function pushAfterCommit(database: D1Database, localIds: string[] | null): Promise<"synced" | "pending" | "conflict" | "disabled"> {
+  if (!booklyEnabled()) return "disabled";
+  try { await pushBooklyChanges(database, localIds); return "synced"; }
+  catch (error) {
+    if (error instanceof BooklyConflict) return "conflict";
+    if (error instanceof BooklyUnavailable) return "pending";
+    throw error;
   }
 }
 
@@ -208,8 +319,9 @@ async function adopt(database: D1Database, remote: Remote, link?: Link) {
   if (cancelled && current) await refundCancelledBooking(database, current, "bookly-sync");
 }
 
-/** Full bounded reconciliation. Called before availability and staff reads, and
- * before/after mutations. A persistent staff endpoint can run it on a schedule.
+/** Full bounded reconciliation. Runs in the background only: the Worker Cron
+ * Trigger, the signed WordPress callback and the staff "sync" action. Request
+ * paths use assertBooklyFresh and pushBooklyChanges instead.
  * Lease owner checks prevent a second Worker from draining the same queue.
  */
 export async function synchronizeBookly(database: D1Database) {
@@ -219,17 +331,31 @@ export async function synchronizeBookly(database: D1Database) {
     .bind(lease, Date.now() + 120_000, Date.now()).run();
   if (acquired.meta.changes !== 1) throw new BooklyUnavailable("Calendar synchronization is in progress. Try again shortly.");
   try {
+    const today = getTodayInEindhoven();
     // Replay uncertain writes before comparing snapshots, using the exact stored
     // payload and command ID, so a lost HTTP response never creates a duplicate.
     await drain(database, lease);
+    // Read links before requesting the snapshot. Request paths can link new
+    // bookings concurrently; only links that existed before the snapshot was
+    // requested may be inferred deleted when the snapshot lacks them.
+    const links = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
+    // Occupancy age counts from the moment the snapshot was requested.
+    const snapshotRequestedAt = new Date().toISOString();
     const snapshot = z.object({ complete: z.literal(true), scopeFrom: z.string().refine(dateIsValid), appointments: z.array(remoteSchema).max(5000) })
       .parse(await booklyRequest("snapshot", {}));
     if (new Set(snapshot.appointments.map(row => row.remoteId)).size !== snapshot.appointments.length) throw new BooklyUnavailable("Duplicate Bookly IDs.");
-    const links = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
     for (const remote of snapshot.appointments) {
-      const link = links.find(item => item.remote_id === remote.remoteId);
+      let link = links.find(item => item.remote_id === remote.remoteId);
+      if (remote.localId && !link) {
+        link = await database.prepare("SELECT * FROM bookly_links WHERE remote_id=?").bind(remote.remoteId).first<Link>() ?? undefined;
+        if (link) links.push(link);
+      }
       if (remote.localId && !link) throw new BooklyUnavailable("Unrecognized Bookly mapping. Recover the pending command first.");
       if (remote.localId && link && remote.localId !== link.local_id) throw new BooklyUnavailable("Bookly identity mismatch.");
+      // Native Bookly history is not imported: an unlinked row is adopted only
+      // while it still occupies today or a future day. Occupancy below still
+      // reads every active snapshot row.
+      if (!link && !remote.localId && (remote.date < today || !["confirmed","payment_pending","completed"].includes(remote.status))) continue;
       await adopt(database, remote, link);
     }
     // Refresh the lease between network phases. Each remote request has a
@@ -270,32 +396,13 @@ export async function synchronizeBookly(database: D1Database) {
       }
     }
     await database.batch(occupancy);
-    const refreshedLinks = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
-    const rows = (await database.prepare(`SELECT * FROM appointments WHERE source != 'bookly'`)
-      .all<Row>()).results;
-    for (const row of rows) {
-      const link = refreshedLinks.find(item => item.local_id === row.id);
-      if (link?.remote_version === "deleted") continue;
-      if (row.source === "bookly" && (!link || await digest(stateOf(row)) === link.local_digest)) continue;
-      // Never import historical cancelled/completed website rows at activation.
-      if (!link && ["cancelled","payment_expired","completed"].includes(row.status)) continue;
-      await enqueue(database,row.id,"appointment",stateOf(row),link);
-    }
-    const blocks = (await database.prepare("SELECT * FROM time_off").all<{ id: string; date: string; start_time: string; end_time: string; reason: string; removed_at: string | null }>()).results;
-    for (const block of blocks) {
-      const localId = `block-${block.id}`;
-      const link = refreshedLinks.find(item => item.local_id === localId);
-      if (!link && block.removed_at) continue;
-      const duration = (Number(block.end_time.slice(0,2))-Number(block.start_time.slice(0,2)))*60 + Number(block.end_time.slice(3))-Number(block.start_time.slice(3));
-      await enqueue(database,localId,"block",{ serviceId:"", date:block.date,time:block.start_time,durationMinutes:duration,handlingMinutes:0,
-        status:block.removed_at ? "removed":"confirmed", customerName:"Shop time off",customerEmail:"",customerPhone:"",notes:block.reason,paymentStatus:"not_applicable" },link);
-    }
+    await enqueueLocal(database, null, today);
     await drain(database, lease);
     const refunds = (await database.prepare(`SELECT a.* FROM appointments a JOIN payment_refunds r ON r.appointment_id=a.id
       WHERE a.status='cancelled' AND a.payment_method='stripe' AND a.payment_status='paid' AND r.status='pending'`).all<Row>()).results;
     for (const booking of refunds) await refundCancelledBooking(database,booking,"bookly-sync");
     await database.prepare("UPDATE bookly_sync_state SET last_success=?,error=NULL WHERE id=1 AND lease=?")
-      .bind(new Date().toISOString(),lease).run();
+      .bind(snapshotRequestedAt,lease).run();
   } catch (error) {
     await database.prepare("UPDATE bookly_sync_state SET error=? WHERE id=1 AND lease=?").bind(error instanceof BooklyConflict ? "conflict":"unavailable",lease).run();
     throw error;

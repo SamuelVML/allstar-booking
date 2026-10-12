@@ -8,6 +8,9 @@ import { createRequire } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac, createHash } from 'node:crypto';
 import ts from 'typescript';
+// Relative dates keep these fixtures in the future; activation skips history.
+const amsterdamDay = offset => new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Amsterdam',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(Date.now()+offset*86400000));
+const D1 = amsterdamDay(21); const D2 = amsterdamDay(22); const SCOPE = amsterdamDay(-7);
 const require = createRequire(import.meta.url);
 const db = new DatabaseSync(':memory:');
 for (const name of fs.readdirSync('drizzle').filter(name => name.endsWith('.sql')).sort()) db.exec(fs.readFileSync(`drizzle/${name}`, 'utf8'));
@@ -19,7 +22,7 @@ const database = {
 const env={};let requests=0;let refundCalls=0;let loseReceipt=false;let incomplete=false;let conflict=false;
 const remote=new Map();const receipts=new Map();let nextId=100;
 const version = state => createHash('sha256').update(JSON.stringify(state)).digest('hex');
-const sample={remoteId:'7',localId:null,kind:'appointment',version:'a'.repeat(64),serviceId:'haircut',serviceName:'Haircut',date:'2026-11-03',time:'10:03',endDate:'2026-11-03',endTime:'10:33',durationMinutes:30,extraMinutes:10,status:'confirmed',customerName:'Amaury customer',customerEmail:'a@example.com',customerPhone:'123456789',notes:'',priceCents:3500,paid:true,group:false};
+const sample={remoteId:'7',localId:null,kind:'appointment',version:'a'.repeat(64),serviceId:'haircut',serviceName:'Haircut',date:D1,time:'10:03',endDate:D1,endTime:'10:33',durationMinutes:30,extraMinutes:10,status:'confirmed',customerName:'Amaury customer',customerEmail:'a@example.com',customerPhone:'123456789',notes:'',priceCents:3500,paid:true,group:false};
 async function fakeFetch(url, options){
   requests++;
   const route = new URL(url).pathname.replace('/wp-json','');
@@ -27,7 +30,7 @@ async function fakeFetch(url, options){
   assert.equal(h['X-Allstar-Signature'],createHmac('sha256',env.BOOKLY_BRIDGE_SECRET).update(`${h['X-Allstar-Timestamp']}\n${h['X-Allstar-Nonce']}\n${route}\n${options.body}`).digest('hex'));
   assert.equal(options.redirect,'error');
   const input=JSON.parse(options.body);
-  if(route.endsWith('/snapshot'))return Response.json({complete:!incomplete,scopeFrom:'2026-10-05',appointments:[...remote.values()]});
+  if(route.endsWith('/snapshot'))return Response.json({complete:!incomplete,scopeFrom:SCOPE,appointments:[...remote.values()]});
   if(route.endsWith('/availability'))return Response.json({days:input.days.map(day=>({...day,times:day.times.filter(t=>t!=='11:00')}))});
   if(route.endsWith('/command')){
     if(conflict)return Response.json({error:'conflict'},{status:409});
@@ -63,14 +66,14 @@ remote.set(sample.remoteId,sample);
 await bridge.synchronizeBookly(database);
 assert.equal(db.prepare("SELECT source FROM appointments WHERE id='bookly-7'").get().source,'bookly');
 assert.equal(db.prepare("SELECT payment_status FROM appointments WHERE id='bookly-7'").get().payment_status,'managed_in_bookly');
-assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_occupied_slots WHERE slot_start='2026-11-03T10:00'").get().n,1,'off-grid starts block the preceding grid cell');
-assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_occupied_slots WHERE slot_start='2026-11-03T10:40'").get().n,1,'buffer and partial grid tail block conservatively');
+assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_occupied_slots WHERE slot_start=?").get(`${D1}T10:00`).n,1,'off-grid starts block the preceding grid cell');
+assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_occupied_slots WHERE slot_start=?").get(`${D1}T10:40`).n,1,'buffer and partial grid tail block conservatively');
 assert.equal(receipts.size,0,'native Bookly rows are never echoed back');
-const filtered=await bridge.filterBooklyTimes('haircut',40,[{date:'2026-11-03',times:['11:00','11:05']}]);
+const filtered=await bridge.filterBooklyTimes('haircut',40,[{date:D1,times:['11:00','11:05']}]);
 assert.equal(JSON.stringify(filtered[0].times),JSON.stringify(['11:05']));
 console.log('PASS: opt-in, signed requests, native import, external payment ownership, conservative slots and live schedule filtering');
 const id=crypto.randomUUID();
-db.prepare(`INSERT INTO appointments(id,reference,service_id,service_name,duration_minutes,price_cents,appointment_date,start_time,end_time,customer_name,customer_email,customer_phone,handling_minutes) VALUES (?, 'AS-TEST','haircut','Haircut',30,3500,'2026-11-03','11:00','11:30','Web customer','web@example.com','123456789',10)`).run(id);
+db.prepare(`INSERT INTO appointments(id,reference,service_id,service_name,duration_minutes,price_cents,appointment_date,start_time,end_time,customer_name,customer_email,customer_phone,handling_minutes) VALUES (?, 'AS-TEST','haircut','Haircut',30,3500,'${D1}','11:00','11:30','Web customer','web@example.com','123456789',10)`).run(id);
 loseReceipt=true;
 await assert.rejects(()=>bridge.synchronizeBookly(database),/could not be reached/);
 assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE status='pending'").get().n,1);
@@ -96,7 +99,7 @@ remote.get('7').time='10:10';remote.get('7').endTime='10:40';remote.get('7').ver
 await bridge.synchronizeBookly(database);
 assert.equal(db.prepare("SELECT start_time FROM appointments WHERE id='bookly-7'").get().start_time,'10:10');
 // A local edit and a remote edit of the same mapped booking must hold, not overwrite.
-const id2=crypto.randomUUID();db.prepare(`INSERT INTO appointments(id,reference,service_id,service_name,duration_minutes,price_cents,appointment_date,start_time,end_time,customer_name,customer_email,customer_phone) VALUES (?,'AS-OTHER','haircut','Haircut',30,3500,'2026-11-04','11:00','11:30','Other','other@example.com','123456789')`).run(id2);
+const id2=crypto.randomUUID();db.prepare(`INSERT INTO appointments(id,reference,service_id,service_name,duration_minutes,price_cents,appointment_date,start_time,end_time,customer_name,customer_email,customer_phone) VALUES (?,'AS-OTHER','haircut','Haircut',30,3500,'${D2}','11:00','11:30','Other','other@example.com','123456789')`).run(id2);
 await bridge.synchronizeBookly(database);
 db.prepare("UPDATE appointments SET start_time='11:15',end_time='11:45',revision=revision+1 WHERE id=?").run(id2);
 const other=[...remote.values()].find(r=>r.localId===id2);other.time='12:00';other.endTime='12:30';other.version='e'.repeat(64);

@@ -1,4 +1,4 @@
-import { synchronizeBookly, filterBooklyTimes, booklyEnabled } from "@/lib/bookly";
+import { assertBooklyFresh, filterBooklyTimes, booklyEnabled } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   buildAvailableTimes,
@@ -43,7 +43,8 @@ export async function GET(request: Request) {
     }
 
     await releaseExpiredPaymentReservations(database);
-    await synchronizeBookly(database);
+    // Background sync keeps Bookly occupancy current; stale occupancy fails closed.
+    await assertBooklyFresh(database);
     const rangeStart = date || today;
     const rangeEnd = date || maximumDate;
     const rows = await database

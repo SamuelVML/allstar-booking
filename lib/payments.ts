@@ -1,6 +1,6 @@
 import { refundCancelledBooking } from "@/lib/refunds";
 import type { ManagedBooking } from "@/lib/booking-management";
-import { synchronizeBookly } from "@/lib/bookly";
+import { pushAfterCommit } from "@/lib/bookly";
 export async function releaseExpiredPaymentReservations(database: D1Database) {
   const now = new Date().toISOString();
   const expired = await database
@@ -51,7 +51,8 @@ export async function confirmPaidAppointment(
     const latePayment = await database.prepare("SELECT * FROM appointments WHERE id=? AND status='cancelled'").bind(appointmentId).first<ManagedBooking>();
     if (latePayment) await refundCancelledBooking(database,latePayment,"late-stripe-payment");
   }
-  await synchronizeBookly(database);
+  // The webhook outcome is committed; Bookly delivery replays in the background.
+  await pushAfterCommit(database, [appointmentId]);
 }
 
 export async function expirePaymentAppointment(

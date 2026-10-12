@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation, getStaffUser } from "@/lib/staff-auth";
-import { booklyEnabled, booklyRequest, synchronizeBookly } from "@/lib/bookly";
+import { BOOKLY_MAX_OCCUPANCY_AGE_SECONDS, booklyEnabled, booklyOccupancyAgeSeconds, booklyRequest, synchronizeBookly } from "@/lib/bookly";
 const headers = { "Cache-Control": "private, no-store" };
 export async function GET(request: Request) {
   if (!await getStaffUser(request.headers)) return Response.json({ error: "Not authorised." }, { status: 403, headers });
@@ -9,7 +9,9 @@ export async function GET(request: Request) {
   const database = getD1();
   const state = await database.prepare("SELECT last_success,error FROM bookly_sync_state WHERE id=1").first();
   const pending = await database.prepare("SELECT id,local_id,error,created_at FROM bookly_commands WHERE status='pending' ORDER BY created_at").all();
-  return Response.json({ enabled: true, state, pending: pending.results }, { headers });
+  const occupancyAgeSeconds = await booklyOccupancyAgeSeconds(database);
+  return Response.json({ enabled: true, state, pending: pending.results, occupancyAgeSeconds,
+    maxOccupancyAgeSeconds: BOOKLY_MAX_OCCUPANCY_AGE_SECONDS }, { headers });
 }
 export async function POST(request: Request) {
   if (!await authoriseStaffMutation(request)) return Response.json({ error: "Not authorised." }, { status: 403, headers });

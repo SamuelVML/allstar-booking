@@ -1,4 +1,4 @@
-import { synchronizeBookly, filterBooklyTimes } from "@/lib/bookly";
+import { assertBooklyFresh, filterBooklyTimes } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   buildAvailableTimes,
@@ -48,7 +48,7 @@ export async function GET(request: Request) {
     const rangeStart = date || today;
     const rangeEnd = date || addDays(today, recommendationDays);
     await releaseExpiredPaymentReservations(database);
-    await synchronizeBookly(database);
+    await assertBooklyFresh(database);
     const rows = await database
       .prepare(
         "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'appointment' AS kind FROM bookly_occupied_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",

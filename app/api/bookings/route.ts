@@ -1,4 +1,4 @@
-import { synchronizeBookly, filterBooklyTimes, booklyEnabled, BooklyConflict, BooklyUnavailable } from "@/lib/bookly";
+import { assertBooklyFresh, pushBooklyChanges, filterBooklyTimes, booklyEnabled, BooklyConflict, BooklyUnavailable } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   addMinutes,
@@ -30,6 +30,7 @@ type BookingPayload = {
 };
 
 export async function POST(request: Request) {
+  let reserved = false;
   try {
     const payload = (await request.json()) as BookingPayload;
     const service = getService(payload.serviceId ?? "");
@@ -73,11 +74,17 @@ export async function POST(request: Request) {
     if (booklyEnabled() && (!requestId || !/^[a-f0-9-]{36}$/.test(requestId))) {
       return Response.json({ error: "Refresh the booking page before continuing." }, { status: 400 });
     }
-    await synchronizeBookly(database);
+    // Imported Bookly occupancy must be current; the live check below and the
+    // pushed command then close the remaining window.
+    await assertBooklyFresh(database);
     if (requestId) {
       const previous = await database.prepare("SELECT * FROM appointments WHERE booking_request_id = ?").bind(requestId)
         .first<{ id: string; reference: string; service_id: string; customer_email: string; customer_name: string; payment_method: string; payment_status: string; customer_account_id: string | null; appointment_date: string; start_time: string; service_name: string; end_time: string; duration_minutes: number; price_cents: number; status: string; stripe_checkout_session_id: string | null }>();
       if (previous) {
+        reserved = true;
+        // Deliver a command left pending by an interrupted attempt. A Bookly
+        // rejection cancels the unpaid hold and surfaces as BooklyConflict.
+        await pushBooklyChanges(database, [previous.id]);
         if (previous.service_id !== service.id || previous.customer_email !== email || previous.appointment_date !== date || previous.start_time !== time) {
           return Response.json({ error: "This booking request was already used. Refresh before starting a different booking." }, { status: 409 });
         }
@@ -214,7 +221,10 @@ export async function POST(request: Request) {
     ];
 
     await database.batch(statements);
-    await synchronizeBookly(database);
+    reserved = true;
+    // Write the hold to Bookly before checkout or confirmation. Bookly rejects a
+    // slot taken there since the last snapshot; the hold is then cancelled.
+    await pushBooklyChanges(database, [appointmentId]);
 
     if (paymentMethod === "stripe") {
       try {
@@ -252,7 +262,7 @@ export async function POST(request: Request) {
           database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(appointmentId),
           database.prepare("UPDATE appointments SET status='payment_expired',payment_status='expired' WHERE id=?").bind(appointmentId),
         ]);
-        try { await synchronizeBookly(database); } catch { /* Persistent retry retains the cancellation. */ }
+        try { await pushBooklyChanges(database, [appointmentId]); } catch { /* Persistent retry retains the cancellation. */ }
         console.error("Stripe Checkout creation failed", error);
         return Response.json(
           { error: "Online checkout could not start. Choose cash or try again." },
@@ -302,8 +312,12 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error) {
-    if (error instanceof BooklyConflict) return Response.json({ error: error.message }, { status: 409 });
-    if (error instanceof BooklyUnavailable) return Response.json({ error: "The calendar connection was interrupted. Your request is retained; retry this same form before starting another booking." }, { status: 503 });
+    if (error instanceof BooklyConflict) return Response.json({ error: "That time was just booked. Please choose another time." }, { status: 409 });
+    if (error instanceof BooklyUnavailable) {
+      return Response.json({ error: reserved
+        ? "The calendar connection was interrupted. Your request is retained; retry this same form before starting another booking."
+        : "Online booking is temporarily unavailable. Please try again shortly." }, { status: 503 });
+    }
     const message = error instanceof Error ? error.message : "";
     if (message.includes("UNIQUE") || message.includes("constraint") || message.includes("Slot unavailable")) {
       return Response.json(
