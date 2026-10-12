@@ -10,5 +10,8 @@ declare namespace Cloudflare {
     BOOKING_EMAIL_REPLY_TO?: string;
     BOOKING_ADMIN_EMAIL?: string;
     BOOKING_BUSINESS_NAME?: string;
+    BOOKLY_SYNC_ENABLED?: string;
+    BOOKLY_BRIDGE_URL?: string;
+    BOOKLY_BRIDGE_SECRET?: string;
   }
 }
