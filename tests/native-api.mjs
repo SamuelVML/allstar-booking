@@ -112,11 +112,12 @@ for (const item of rankedBody.recommendations) {
 for (let index=1;index<rankedBody.recommendations.length;index+=1) {
   assert.ok(rankedBody.recommendations[index-1].score>=rankedBody.recommendations[index].score,'ranked highest first');
 }
-const scoped = await request(recommendations,'?service=haircut&date=2026-09-22');
+const scopedDate = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+const scoped = await request(recommendations,`?service=haircut&date=${scopedDate}`);
 assert.equal(scoped.status,200);
 const scopedBody = await scoped.json();
-assert.equal(scopedBody.date,'2026-09-22');
-assert.ok(scopedBody.recommendations.every(item=>item.date==='2026-09-22'),'a date scopes the ranking to that day');
+assert.equal(scopedBody.date,scopedDate);
+assert.ok(scopedBody.recommendations.every(item=>item.date===scopedDate),'a date scopes the ranking to that day');
 
 db.close();
 console.log('PASS: native API rejects missing/wrong audience/outsider tokens before DB access; date filtering, literal search, customer history, ranked Backstage recommendations, no-store and minimal fields');

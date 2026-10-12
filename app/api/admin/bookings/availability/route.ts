@@ -1,3 +1,4 @@
+import { synchronizeBookly } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import { getStaffUser } from "@/lib/staff-auth";
 import { availableForBooking, validManagementDate, type ManagedBooking } from "@/lib/booking-management";
@@ -9,6 +10,7 @@ export async function GET(request: Request) {
   const date = url.searchParams.get("date") ?? "";
   try {
     const database = getD1();
+    await synchronizeBookly(database);
     const stored = await readBookingSettings(database);
     if (!validManagementDate(date, stored.settings.bookingWindowDays)) return Response.json({ error: `Choose a date within the next ${stored.settings.bookingWindowDays} days.` }, { status: 400 });
     const booking = await database.prepare("SELECT * FROM appointments WHERE reference = ?").bind(url.searchParams.get("reference") ?? "").first<ManagedBooking>();

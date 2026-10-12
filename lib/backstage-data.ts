@@ -1,3 +1,4 @@
+import { synchronizeBookly } from "@/lib/bookly";
 /**
  * Server-side reads for Backstage. These run inside server components and the
  * protected API routes, never in the browser — the D1 binding is not reachable
@@ -13,6 +14,7 @@ const APPOINTMENT_COLUMNS = `reference, revision, source, customer_account_id, s
 
 export async function readDay(date: string) {
   const database = getD1();
+  await synchronizeBookly(database);
   const [appointments, blocks] = await Promise.all([
     database
       .prepare(
@@ -37,6 +39,7 @@ export type DatedTimeOffBlock = TimeOffBlock & { date: string };
 /** Inclusive on both ends. Used by the week calendar and by Revenue. */
 export async function readRange(from: string, to: string) {
   const database = getD1();
+  await synchronizeBookly(database);
   const [appointments, blocks] = await Promise.all([
     database
       .prepare(
@@ -76,6 +79,7 @@ export type CustomerRow = {
  */
 export async function searchCustomers(query: string) {
   const database = getD1();
+  await synchronizeBookly(database);
   const trimmed = query.trim();
   if (!trimmed) {
     return (
@@ -108,6 +112,7 @@ export async function searchCustomers(query: string) {
 
 export async function readCustomer(id: string) {
   const database = getD1();
+  await synchronizeBookly(database);
   const account = await database
     .prepare(
       `SELECT id, name, email, phone, loyalty_points, completed_visits, last_visit_at,

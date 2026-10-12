@@ -1,3 +1,4 @@
+import { synchronizeBookly } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -40,6 +41,7 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Check the form fields and try again." }, { status: 400 });
   try {
     const database = getD1();
+    await synchronizeBookly(database);
     const stored = await readBookingSettings(database);
     const input = parsed.data;
     if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
@@ -65,6 +67,8 @@ export async function POST(request: Request) {
         );
       }
 
+      if (conflicts.some(booking => booking.source === "bookly")) throw new BookingConflict("Reschedule or cancel the affected Bookly appointments in Bookly first.");
+
       const pendingReservation = await database
         .prepare(
           `SELECT reference FROM appointments
@@ -84,10 +88,15 @@ export async function POST(request: Request) {
       // fails without changing a customer booking.
       const blockedDays = await blockFullDays(database, input, user.id, stored);
 
-      let refundsPending = 0;
-      let notificationsSent = true;
+      const cancelled: { booking: ManagedBooking; changeId: string }[] = [];
       for (const booking of conflicts) {
         const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
+        cancelled.push({ booking, changeId: change.changeId });
+      }
+      await synchronizeBookly(database);
+      let refundsPending = 0;
+      let notificationsSent = true;
+      for (const { booking, changeId } of cancelled) {
         const refundStatus = await refundCancelledBooking(database, booking, user.id);
         if (refundStatus === "pending") refundsPending += 1;
         if (booking.customer_email) {
@@ -95,12 +104,13 @@ export async function POST(request: Request) {
             (await sendBookingChangeNotification(
               booking,
               "cancel",
-              change.changeId,
+              changeId,
               undefined,
               refundStatus,
             )) && notificationsSent;
         }
       }
+      await synchronizeBookly(database);
       return Response.json({
         saved: true,
         blockedDays,
@@ -131,6 +141,7 @@ export async function POST(request: Request) {
       const refundStatus = await refundCancelledBooking(database, booking, user.id);
       return Response.json({ saved: true, refundStatus });
     }
+    await synchronizeBookly(database);
     return Response.json({ saved: true });
   } catch (error) {
     if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });

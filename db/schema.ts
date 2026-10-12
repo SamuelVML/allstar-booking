@@ -24,6 +24,7 @@ export const appointments = sqliteTable(
   {
     id: text("id").primaryKey(),
     reference: text("reference").notNull().unique(),
+    bookingRequestId: text("booking_request_id"),
     revision: integer("revision").notNull().default(0),
     source: text("source").notNull().default("online"),
     createdBy: text("created_by"),
@@ -155,3 +156,28 @@ export const paymentRefunds = sqliteTable(
     uniqueIndex("payment_refunds_appointment_id_unique").on(table.appointmentId),
   ],
 );
+
+// Calendar integration custody and retry records. See 0008_bookly_bridge.sql.
+export const booklyLinks = sqliteTable("bookly_links", {
+  localId: text("local_id").primaryKey(), remoteId: text("remote_id").notNull().unique(),
+  remoteVersion: text("remote_version").notNull(), localDigest: text("local_digest").notNull(),
+  kind: text("kind").notNull().default("appointment"),
+});
+export const booklyCommands = sqliteTable("bookly_commands", {
+  id: text("id").primaryKey(), localId: text("local_id").notNull(), payload: text("payload").notNull(),
+  digest: text("digest").notNull(), status: text("status").notNull().default("pending"), error: text("error"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, table => [uniqueIndex("bookly_commands_pending").on(table.localId).where(sql`${table.status} = 'pending'`)]);
+export const booklySyncState = sqliteTable("bookly_sync_state", {
+  id: integer("id").primaryKey(), lease: text("lease"), leaseUntil: integer("lease_until").notNull().default(0),
+  lastSuccess: text("last_success"), error: text("error"),
+});
+export const booklyOccupiedSlots = sqliteTable("bookly_occupied_slots", {
+  slotStart: text("slot_start").notNull(), appointmentId: text("appointment_id").notNull(),
+}, table => [uniqueIndex("bookly_occupied_slot_identity").on(table.slotStart, table.appointmentId)]);
+export const booklyCallbackNonces = sqliteTable("bookly_callback_nonces", {
+  nonce: text("nonce").primaryKey(), expires: integer("expires").notNull(),
+});
+export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
+  id: text("id").primaryKey(), valid: integer("valid").notNull(),
+});

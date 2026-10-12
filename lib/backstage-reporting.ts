@@ -97,7 +97,7 @@ export function summarise(
       key: "pending",
       label: "Pending",
       detail: "Due at the shop or awaiting online payment",
-      cents: sum(rows, (row) => row.status !== "cancelled" && !paid(row)),
+      cents: sum(rows, (row) => row.source !== "bookly" && row.status !== "cancelled" && !paid(row)),
       tone: "due",
     },
     {

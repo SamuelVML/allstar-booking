@@ -108,6 +108,7 @@ function load(relative) {
 
   const resolve = name => {
     if (mocks[name]) return mocks[name];
+    if (name === "cloudflare:workers") return { env: {} };
     if (name === '@/lib/booking') {
       return {
         ...load('lib/booking.ts'),
@@ -334,3 +335,12 @@ if (process.env.BACKSTAGE_HTML_OUT) {
 }
 
 console.log('PASS: all five Backstage screens render, Samaritan asks the protected endpoint on the 30s cadence, and every page refuses unauthenticated visitors');
+
+// Booking entry uses native navigation so a failed client-side route transition
+// cannot consume the click. This is a render contract, not a browser click proof.
+const home = renderToStaticMarkup(React.createElement(load('app/site-home.tsx').default, {
+  initialLanguage: 'en', todayWeekday: 2, bookingSettings: load('lib/booking.ts').DEFAULT_BOOKING_SETTINGS,
+}));
+assert.match(home, /<a class="btn btn-primary btn-block" href="\/book"/);
+assert.match(home, /href="\/book\?service=haircut"/);
+console.log('PASS: homepage booking CTA and service rows render native booking links');

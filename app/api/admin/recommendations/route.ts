@@ -1,3 +1,4 @@
+import { synchronizeBookly, filterBooklyTimes } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   buildAvailableTimes,
@@ -47,9 +48,10 @@ export async function GET(request: Request) {
     const rangeStart = date || today;
     const rangeEnd = date || addDays(today, recommendationDays);
     await releaseExpiredPaymentReservations(database);
+    await synchronizeBookly(database);
     const rows = await database
       .prepare(
-        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'appointment' AS kind FROM bookly_occupied_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${rangeStart}T00:00`, `${rangeEnd}T23:59`)
       .all<{ slot_start: string; kind: "appointment" | "time_off" }>();
@@ -74,8 +76,9 @@ export async function GET(request: Request) {
       if (times.length > 0) availableDays.push({ date: candidateDate, times });
     }
 
+    const filteredDays = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, availableDays);
     const recommendations = rankRecommendations({
-      availableDays,
+      availableDays: filteredDays,
       occupiedSlots: appointmentSlots,
       durationMinutes,
       serviceName: service.name,

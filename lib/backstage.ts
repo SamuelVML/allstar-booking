@@ -1,3 +1,4 @@
+import { filterBooklyTimes } from "@/lib/bookly";
 import { addMinutes, buildAvailableTimes, getService, makeSlotKeys } from "@/lib/booking";
 import { BookingConflict, validManagementDate } from "@/lib/booking-management";
 import { readBookingSettings, type StoredBookingSettings } from "@/lib/booking-settings";
@@ -112,12 +113,14 @@ export async function createWalkIn(database: D1Database, input: { id: string; da
   const { settings } = stored;
   const service = getService(input.serviceId);
   if (!service || service.isAddOn || !validManagementDate(input.date, settings.bookingWindowDays)) throw new BookingConflict(`Choose a valid service and date within ${settings.bookingWindowDays} days.`);
-  const rows = await database.prepare("SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?")
+  const rows = await database.prepare("SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM bookly_occupied_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?")
     .bind(`${input.date}T00:00`, `${input.date}T23:59`).all<{ slot_start: string }>();
   // Staff can book from the current time, without the online one-hour lead time.
   if (!buildAvailableTimes(input.date, service.durationMinutes, new Set(rows.results.map(row => row.slot_start)), settings.handlingBufferMinutes, 0, new Date(), settings).includes(input.time)) {
     throw new BookingConflict("That time is unavailable. Check opening hours, breaks and existing bookings.");
   }
+  const checked = await filterBooklyTimes(service.id, service.durationMinutes + settings.handlingBufferMinutes, [{ date: input.date, times: [input.time] }]);
+  if (!checked[0].times.includes(input.time)) throw new BookingConflict("That time is occupied in Bookly.");
   const reference = `WI-${input.date.replaceAll("-", "")}-${input.id.slice(0, 8).toUpperCase()}`;
   await batch(database, [
     database.prepare(`INSERT INTO appointments (id, reference, service_id, service_name, duration_minutes, price_cents,
@@ -135,7 +138,7 @@ export async function recordPayment(database: D1Database, input: { id: string; r
   const results = await batch(database, [
     database.prepare(`INSERT INTO payment_receipts (id, appointment_id, amount_cents, method, actor_id)
       SELECT ?, id, price_cents, ?, ? FROM appointments WHERE reference = ? AND revision = ?
-      AND status IN ('confirmed', 'completed') AND payment_status = 'due_at_shop' AND payment_method != 'stripe'`)
+      AND source != 'bookly' AND status IN ('confirmed', 'completed') AND payment_status = 'due_at_shop' AND payment_method != 'stripe'`)
       .bind(input.id, input.method, actor, input.reference, input.revision),
     database.prepare(`UPDATE appointments SET payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP, revision = revision + 1
       WHERE reference = ? AND revision = ? AND EXISTS (SELECT 1 FROM payment_receipts WHERE id = ? AND appointment_id = appointments.id)`)

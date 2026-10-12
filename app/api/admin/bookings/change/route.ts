@@ -1,3 +1,4 @@
+import { synchronizeBookly, BooklyConflict } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -21,15 +22,18 @@ export async function POST(request: Request) {
   if (payload.action === "reschedule" && (!payload.date || !payload.time)) return Response.json({ error: "Choose a date and time." }, { status: 400 });
   try {
     const database = getD1();
+    await synchronizeBookly(database);
     const stored = await readBookingSettings(database);
     const booking = await database.prepare("SELECT * FROM appointments WHERE reference = ?").bind(payload.reference).first<ManagedBooking>();
     if (!booking) return Response.json({ error: "Booking not found." }, { status: 404 });
     if (booking.revision !== payload.revision) throw new BookingConflict("The booking changed. Refresh and try again.");
     const target = payload.action === "reschedule" ? { date: payload.date!, time: payload.time! } : undefined;
     const change = await changeBooking(database, booking, payload.action, user.id, target, stored);
+    await synchronizeBookly(database);
     const refundStatus = payload.action === "cancel"
       ? await refundCancelledBooking(database, booking, user.id)
       : "not_needed";
+    await synchronizeBookly(database);
     let notificationsSent = true;
     if (payload.action !== "complete" && booking.customer_email) {
       notificationsSent = await sendBookingChangeNotification(
@@ -47,7 +51,7 @@ export async function POST(request: Request) {
       refundStatus,
     });
   } catch (error) {
-    if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof BookingConflict || error instanceof BooklyConflict) return Response.json({ error: error.message }, { status: 409 });
     console.error("Staff booking change failed");
     return Response.json({ error: "Unable to save the booking. Refresh before retrying." }, { status: 503 });
   }
