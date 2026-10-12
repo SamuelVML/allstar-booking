@@ -13,5 +13,6 @@ declare namespace Cloudflare {
     BOOKLY_SYNC_ENABLED?: string;
     BOOKLY_BRIDGE_URL?: string;
     BOOKLY_BRIDGE_SECRET?: string;
+    STRIPE_REQUIRE_TEST_MODE?: string;
   }
 }
