@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, uniqueIndex, text } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, sqliteTable, uniqueIndex, text } from "drizzle-orm/sqlite-core";
 
 export const customerAccounts = sqliteTable(
   "customer_accounts",
@@ -54,6 +54,8 @@ export const appointments = sqliteTable(
       table.appointmentDate,
       table.status,
     ),
+    // Idempotent website booking retries. See 0008_bookly_bridge.sql.
+    uniqueIndex("appointments_request_id").on(table.bookingRequestId).where(sql`${table.bookingRequestId} IS NOT NULL`),
   ],
 );
 
@@ -171,13 +173,13 @@ export const booklyCommands = sqliteTable("bookly_commands", {
 export const booklySyncState = sqliteTable("bookly_sync_state", {
   id: integer("id").primaryKey(), lease: text("lease"), leaseUntil: integer("lease_until").notNull().default(0),
   lastSuccess: text("last_success"), error: text("error"),
-});
+}, table => [check("bookly_sync_state_singleton", sql`${table.id} = 1`)]);
 export const booklyOccupiedSlots = sqliteTable("bookly_occupied_slots", {
   slotStart: text("slot_start").notNull(), appointmentId: text("appointment_id").notNull(),
-}, table => [uniqueIndex("bookly_occupied_slot_identity").on(table.slotStart, table.appointmentId)]);
+}, table => [primaryKey({ columns: [table.slotStart, table.appointmentId] })]);
 export const booklyCallbackNonces = sqliteTable("bookly_callback_nonces", {
   nonce: text("nonce").primaryKey(), expires: integer("expires").notNull(),
 });
 export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
   id: text("id").primaryKey(), valid: integer("valid").notNull(),
-});
+}, table => [check("bookly_revision_guards_valid", sql`${table.valid} = 1`)]);
