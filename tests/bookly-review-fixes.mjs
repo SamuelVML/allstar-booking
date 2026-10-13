@@ -100,6 +100,9 @@ function load(relative) {
       if (name === '@/lib/booking-email') return {
         async sendBookingConfirmation() { return true; },
         async sendBookingChangeNotification(booking, _action, changeId) { emails.push({ reference: booking.reference, changeId }); return true; },
+        // Obligations store the prepared request and deliver it verbatim.
+        prepareBookingChangeNotification(booking, _action, changeId) { return [{ idempotencyKey: `booking-change/${changeId}/0`, body: { reference: booking.reference, changeId } }]; },
+        async deliverPreparedEmails(messages) { for (const message of messages) emails.push({ ...message.body }); return true; },
       };
       if (name === '@/db') return { getD1: () => database };
       if (name.startsWith('@/')) {

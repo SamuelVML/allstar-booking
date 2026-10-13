@@ -29,6 +29,62 @@ type BookingPayload = {
   marketingConsent?: boolean;
 };
 
+type HeldBooking = { id: string; reference: string; customer_email: string; service_name: string; price_cents: number;
+  status: string; payment_method: string; payment_expires_at: string | null; stripe_checkout_session_id: string | null };
+
+/** Stripe Checkout for a held booking. Every attempt for the same hold sends
+ * identical parameters under an idempotency key derived from the booking and
+ * its hold expiry, so a retry or a concurrent retry receives the session
+ * already created instead of a second one. */
+async function checkoutFor(booking: HeldBooking, origin: string) {
+  const expiresAt = Math.floor(new Date(booking.payment_expires_at!).getTime() / 1000);
+  return getStripeClient().checkout.sessions.create({
+    mode: "payment",
+    customer_email: booking.customer_email,
+    line_items: [{ price_data: { currency: "eur", product_data: { name: booking.service_name }, unit_amount: booking.price_cents }, quantity: 1 }],
+    metadata: { appointment_id: booking.id, booking_reference: booking.reference },
+    success_url: `${origin}/book/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${origin}/book?payment=cancelled`,
+    expires_at: expiresAt,
+    integration_identifier: "allstar_web_kqmrstuv",
+  }, { idempotencyKey: `booking-checkout/${booking.id}/${expiresAt}` });
+}
+
+/** Stripe requires a Checkout Session to stay open at least 30 minutes. */
+const CHECKOUT_MIN_OPEN_MS = 30 * 60_000 + 15_000;
+
+/** Resume payment for a retried request whose hold has no Checkout Session
+ * yet (interrupted before or after Checkout creation). Returns the Checkout
+ * URL, or null when the hold is no longer payable. */
+async function resumeCheckout(database: D1Database, id: string, origin: string, holdMinutes: number): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const booking = await database.prepare("SELECT * FROM appointments WHERE id = ?").bind(id).first<HeldBooking>();
+    if (!booking || booking.status !== "payment_pending" || booking.payment_method !== "stripe" || !booking.payment_expires_at) return null;
+    if (booking.stripe_checkout_session_id) {
+      const session = await getStripeClient().checkout.sessions.retrieve(booking.stripe_checkout_session_id);
+      return session.url ?? null;
+    }
+    const now = Date.now();
+    const expiresAt = new Date(booking.payment_expires_at).getTime();
+    if (expiresAt <= now) return null;
+    if (expiresAt - now < CHECKOUT_MIN_OPEN_MS) {
+      // Renew the hold once so Stripe accepts the session. Concurrent retries
+      // race on the old expiry; the loser re-reads and uses the winner's.
+      const renewed = new Date(now + (holdMinutes + 1) * 60_000).toISOString();
+      const claimed = await database.prepare(`UPDATE appointments SET payment_expires_at = ? WHERE id = ? AND status = 'payment_pending'
+        AND stripe_checkout_session_id IS NULL AND payment_expires_at = ?`).bind(renewed, id, booking.payment_expires_at).run();
+      if (claimed.meta.changes !== 1) continue;
+      booking.payment_expires_at = renewed;
+    }
+    const session = await checkoutFor(booking, origin);
+    if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+    await database.prepare("UPDATE appointments SET stripe_checkout_session_id = ? WHERE id = ? AND stripe_checkout_session_id IS NULL")
+      .bind(session.id, id).run();
+    return session.url;
+  }
+  throw new BooklyUnavailable("The payment is being prepared. Retry this same form in a moment.");
+}
+
 export async function POST(request: Request) {
   let reserved = false;
   try {
@@ -88,9 +144,12 @@ export async function POST(request: Request) {
         if (previous.service_id !== service.id || previous.customer_email !== email || previous.appointment_date !== date || previous.start_time !== time) {
           return Response.json({ error: "This booking request was already used. Refresh before starting a different booking." }, { status: 409 });
         }
-        if (previous.status === "payment_pending" && previous.stripe_checkout_session_id) {
-          const session = await getStripeClient().checkout.sessions.retrieve(previous.stripe_checkout_session_id);
-          if (session.url) return Response.json({ checkoutUrl: session.url });
+        if (previous.status === "payment_pending" && previous.payment_method === "stripe") {
+          // Resume an interrupted request: the same hold gets its Checkout
+          // Session, created once even when the retry repeats or races.
+          const { settings: holdSettings } = await readBookingSettings(database);
+          const checkoutUrl = await resumeCheckout(database, previous.id, new URL(request.url).origin, holdSettings.paymentHoldMinutes);
+          if (checkoutUrl) return Response.json({ checkoutUrl });
         }
         if (previous.status !== "confirmed") return Response.json({ error: "This request is saved but still needs staff review. Do not create a second booking." }, { status: 409 });
         const { settings: retrySettings } = await readBookingSettings(database);
@@ -227,36 +286,11 @@ export async function POST(request: Request) {
     await pushBooklyChanges(database, [appointmentId]);
 
     if (paymentMethod === "stripe") {
+      let session;
       try {
-        const origin = new URL(request.url).origin;
-        const stripe = getStripeClient();
-        const session = await stripe.checkout.sessions.create({
-          mode: "payment",
-          customer_email: email,
-          line_items: [
-            {
-              price_data: {
-                currency: "eur",
-                product_data: { name: serviceName },
-                unit_amount: priceCents,
-              },
-              quantity: 1,
-            },
-          ],
-          metadata: { appointment_id: appointmentId, booking_reference: reference },
-          success_url: `${origin}/book/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${origin}/book?payment=cancelled`,
-          expires_at: Math.floor(new Date(paymentExpiresAt!).getTime() / 1000),
-          integration_identifier: "allstar_web_kqmrstuv",
-        });
+        session = await checkoutFor({ id: appointmentId, reference, customer_email: email, service_name: serviceName, price_cents: priceCents,
+          status, payment_method: storedPaymentMethod, payment_expires_at: paymentExpiresAt, stripe_checkout_session_id: null }, new URL(request.url).origin);
         if (!session.url) throw new Error("Stripe did not return a checkout URL.");
-        await database
-          .prepare(
-            "UPDATE appointments SET stripe_checkout_session_id = ? WHERE id = ?",
-          )
-          .bind(session.id, appointmentId)
-          .run();
-        return Response.json({ checkoutUrl: session.url }, { status: 201 });
       } catch (error) {
         await database.batch([
           database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(appointmentId),
@@ -269,6 +303,16 @@ export async function POST(request: Request) {
           { status: 503 },
         );
       }
+      // Stored separately: if this write fails, retrying the same request
+      // recovers this session (same idempotency key) and keeps the hold.
+      try {
+        await database.prepare("UPDATE appointments SET stripe_checkout_session_id = ? WHERE id = ? AND stripe_checkout_session_id IS NULL")
+          .bind(session.id, appointmentId).run();
+      } catch (error) {
+        console.error("Checkout Session could not be stored", error);
+        return Response.json({ error: "The payment page could not open. Your request is retained; retry this same form." }, { status: 503 });
+      }
+      return Response.json({ checkoutUrl: session.url }, { status: 201 });
     }
 
     let confirmationEmailSent = false;

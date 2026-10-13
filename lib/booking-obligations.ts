@@ -9,11 +9,15 @@
  * and change emails use `booking-change/<changeId>/<recipient>` with Resend.
  */
 import { refundCancelledBooking, type RefundOutcome } from "@/lib/refunds";
-import { sendBookingChangeNotification } from "@/lib/booking-email";
+import { deliverPreparedEmails, prepareBookingChangeNotification, type PreparedEmail } from "@/lib/booking-email";
+import { addMinutes } from "@/lib/booking";
+import { booklyEnabled } from "@/lib/bookly";
 import type { ManagedBooking } from "@/lib/booking-management";
 import { meteredDatabase, type SubrequestBudget } from "@/lib/subrequest-budget";
 
-type ObligationRow = { id: string; appointment_id: string; change_id: string; kind: "refund" | "notify"; status: string; attempts: number; outcome: string | null };
+type ObligationRow = { id: string; appointment_id: string; change_id: string; kind: "refund" | "notify"; status: string; attempts: number; outcome: string | null;
+  payload: string | null; first_attempt_at: number | null };
+type ChangeRow = { change_action: string; previous_date: string; previous_time: string; new_date: string | null; new_time: string | null };
 
 /** A claim outlives a slow Stripe or Resend call; a crashed worker's claim
  * expires and the obligation is retried. */
@@ -22,11 +26,18 @@ const LEASE_MS = 5 * 60_000;
  * hours after the change, inside Resend's 24-hour idempotency window. */
 export const MAX_OBLIGATION_ATTEMPTS = 8;
 const backoffMs = (attempts: number) => Math.min(2 ** (attempts - 1), 64) * 60_000;
+/** Resend keeps an idempotency key for 24 hours. After that a retry could
+ * deliver the same email twice, so an email whose first delivery started
+ * longer ago than this, without a recorded result, is left for staff
+ * reconciliation instead of being resent. */
+export const PROVIDER_KEY_WINDOW_MS = 23 * 60 * 60_000;
+/** A reschedule email waits for Bookly to accept the move; checked again after this. */
+const CALENDAR_WAIT_MS = 60_000;
 /** Worst-case subrequests per obligation: due read share, claim, booking read
  * and final write in D1, plus the external calls (refund: three D1 and two
- * Stripe requests; email: refund-status read and up to two recipients × three
- * Resend attempts). */
-export const OBLIGATION_COST = { refund: 9, notify: 10 } as const;
+ * Stripe requests; email: one read of the refund and calendar state, the
+ * payload write and up to two recipients × three Resend attempts). */
+export const OBLIGATION_COST = { refund: 9, notify: 12 } as const;
 const EXTERNAL_COST = { refund: 6, notify: 6 } as const;
 
 /** Statements recording the obligations of a cancellation, for the change's
@@ -39,6 +50,16 @@ export function cancellationObligations(database: D1Database, booking: ManagedBo
   if (booking.payment_method === "stripe" && booking.payment_status === "paid") statements.push(insert("refund"));
   if (booking.customer_email) statements.push(insert("notify"));
   return statements;
+}
+
+/** Statement recording the email of a staff reschedule, gated on the change's
+ * own audit row so it commits with the move. Sent once Bookly accepts the move
+ * (or at once when the calendar bridge is off); never sent for a move Bookly
+ * rejected. */
+export function rescheduleNotification(database: D1Database, booking: ManagedBooking, changeId: string) {
+  return database.prepare(`INSERT INTO booking_obligations (id, appointment_id, change_id, kind)
+    SELECT ?, ?, ?, 'notify' WHERE EXISTS (SELECT 1 FROM booking_changes WHERE id = ?) AND ? != ''`)
+    .bind(`notify/${changeId}`, booking.id, changeId, changeId, booking.customer_email ?? "");
 }
 
 export type ObligationSummary = { refundsPending: number; notificationsSent: boolean };
@@ -87,27 +108,15 @@ export async function processBookingObligations(
       if (row.kind === "refund") {
         // Charged up front; runs unmetered so it never stops inside a refund.
         budget?.charge(EXTERNAL_COST.refund);
-        const outcome = await refundCancelledBooking(raw, booking, "booking-obligation");
+        const outcome = await refundCancelledBooking(raw, booking, "booking-obligation", { automatic: true });
         if (outcome === "pending") await retry(database, claim, "Stripe refund not confirmed.");
         else await complete(database, claim, outcome);
         continue;
       }
-      const refund = await database.prepare("SELECT status, outcome, attempts FROM booking_obligations WHERE change_id = ? AND kind = 'refund'")
-        .bind(row.change_id).first<{ status: string; outcome: string | null; attempts: number }>();
-      if (refund && refund.status === "pending" && refund.attempts === 0) {
-        // Wait for the first refund attempt; give the claim back unchanged.
-        await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = 0 WHERE id = ? AND next_attempt_at = ? AND attempts = ?")
-          .bind(row.id, claim.until, claim.attempts).run();
-        continue;
-      }
-      // The stored payment is authoritative: a refund can succeed while its
-      // obligation's completion write failed.
-      const refundStatus: RefundOutcome = booking.payment_status === "refunded" ? "refunded"
-        : !refund ? "not_needed" : refund.status === "done" ? (refund.outcome as RefundOutcome) : "pending";
-      budget?.charge(EXTERNAL_COST.notify);
-      const sent = await sendBookingChangeNotification(booking, "cancel", row.change_id, undefined, refundStatus);
-      if (sent) await complete(database, claim, "sent");
-      else await retry(database, claim, "Email not delivered.");
+      const outcome = await notify(database, claim, booking, budget);
+      if (outcome === "sent") await complete(database, claim, "sent");
+      else if (outcome === "superseded") await complete(database, claim, "superseded");
+      else if (outcome === "failed") await retry(database, claim, "Email not delivered.");
     } catch (error) {
       // The pre-checked cost includes this final write. If it fails, the claim
       // expires and the obligation is retried; external calls are idempotent.
@@ -115,6 +124,69 @@ export async function processBookingObligations(
       catch { break; }
     }
   }
+}
+
+type NotifyOutcome = "sent" | "failed" | "superseded" | "waiting" | "reconcile" | "lost";
+
+/** Send a change email under its claim. The exact provider request is built
+ * once, stored before the first delivery and resent verbatim, so a retry never
+ * reuses an idempotency key with different content. */
+async function notify(database: D1Database, claim: Claim, booking: ManagedBooking, budget?: SubrequestBudget): Promise<NotifyOutcome> {
+  const { row } = claim;
+  if (row.payload) {
+    // Delivered or not, the outcome of the first attempt is unknown here. Past
+    // the provider's key window a resend could duplicate the email.
+    if (row.first_attempt_at !== null && Date.now() - row.first_attempt_at >= PROVIDER_KEY_WINDOW_MS) {
+      await database.prepare(`UPDATE booking_obligations SET status = 'reconcile', next_attempt_at = 0, updated_at = CURRENT_TIMESTAMP,
+          last_error = 'Delivery outcome unknown after the provider idempotency window; confirm with the customer before resending.'
+        WHERE id = ? AND status = 'pending' AND next_attempt_at = ? AND attempts = ?`).bind(row.id, claim.until, claim.attempts).run();
+      return "reconcile";
+    }
+    budget?.charge(EXTERNAL_COST.notify);
+    return await deliverPreparedEmails(JSON.parse(row.payload) as PreparedEmail[]) ? "sent" : "failed";
+  }
+  // One read: the change, its refund obligation and the calendar delivery state.
+  const state = await database.prepare(`SELECT c.action AS change_action, c.previous_date, c.previous_time, c.new_date, c.new_time,
+      (SELECT json_object('status', status, 'outcome', outcome, 'attempts', attempts) FROM booking_obligations WHERE change_id = c.id AND kind = 'refund') AS refund,
+      EXISTS (SELECT 1 FROM bookly_commands WHERE local_id = c.appointment_id AND status IN ('pending','held')) AS calendar_pending
+    FROM booking_changes c WHERE c.id = ?`)
+    .bind(row.change_id).first<ChangeRow & { refund: string | null; calendar_pending: number }>();
+  if (!state) throw new Error("Booking change not found.");
+  const change = state;
+  let messages: PreparedEmail[] | null;
+  if (change.change_action === "reschedule") {
+    // A move Bookly rejected was restored (or replaced by a later change):
+    // nothing was confirmed, so nothing is sent.
+    if (booking.status !== "confirmed" || booking.appointment_date !== change.new_date || booking.start_time !== change.new_time) return "superseded";
+    if (booklyEnabled() && state.calendar_pending) {
+      // Remote acceptance not established yet; give the claim back unchanged.
+      await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = ? WHERE id = ? AND next_attempt_at = ? AND attempts = ?")
+        .bind(Date.now() + CALENDAR_WAIT_MS, row.id, claim.until, claim.attempts).run();
+      return "waiting";
+    }
+    const previous = { ...booking, appointment_date: change.previous_date, start_time: change.previous_time, end_time: addMinutes(change.previous_time, booking.duration_minutes) };
+    messages = prepareBookingChangeNotification(previous, "reschedule", row.change_id, { date: change.new_date!, time: change.new_time! });
+  } else {
+    const refund = state.refund ? JSON.parse(state.refund) as { status: string; outcome: string | null; attempts: number } : null;
+    if (refund && refund.status === "pending" && refund.attempts === 0) {
+      // Wait for the first refund attempt; give the claim back unchanged.
+      await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = 0 WHERE id = ? AND next_attempt_at = ? AND attempts = ?")
+        .bind(row.id, claim.until, claim.attempts).run();
+      return "waiting";
+    }
+    // The stored payment is authoritative: a refund can succeed while its
+    // obligation's completion write failed.
+    const refundStatus: RefundOutcome = booking.payment_status === "refunded" ? "refunded"
+      : !refund ? "not_needed" : refund.status === "done" ? (refund.outcome as RefundOutcome) : "pending";
+    messages = prepareBookingChangeNotification(booking, "cancel", row.change_id, undefined, refundStatus);
+  }
+  if (!messages) return "failed"; // email not configured; retried with backoff
+  const stored = await database.prepare(`UPDATE booking_obligations SET payload = ?, first_attempt_at = ?
+    WHERE id = ? AND status = 'pending' AND next_attempt_at = ? AND attempts = ? AND payload IS NULL`)
+    .bind(JSON.stringify(messages), Date.now(), row.id, claim.until, claim.attempts).run();
+  if (stored.meta.changes !== 1) return "lost"; // the claim expired; its new holder sends
+  budget?.charge(EXTERNAL_COST.notify);
+  return await deliverPreparedEmails(messages) ? "sent" : "failed";
 }
 
 async function complete(database: D1Database, claim: Claim, outcome: string) {

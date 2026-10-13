@@ -46,7 +46,10 @@ export async function availableForBooking(
   return filtered[0].times;
 }
 
-export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }, stored?: StoredBookingSettings) {
+/** `follow` adds statements to the change's own transaction (for example its
+ * notification obligation); they must be gated on the change's audit row. */
+export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }, stored?: StoredBookingSettings,
+  follow?: (changeId: string) => D1PreparedStatement[]) {
   if (booking.source === "bookly") throw new BookingConflict("Manage this Bookly appointment in Bookly.");
   const currentSettings = stored ?? await readBookingSettings(database);
   if (booking.status !== "confirmed") throw new BookingConflict("Only confirmed bookings can be changed.");
@@ -90,6 +93,7 @@ export async function changeBooking(database: D1Database, booking: ManagedBookin
       statements.push(database.prepare(`UPDATE appointments SET status = 'cancelled', revision = revision + 1 WHERE id = ? AND ${gate}`).bind(booking.id, changeId));
     }
   }
+  if (follow) statements.push(...follow(changeId));
   let results;
   try { results = await database.batch(statements); }
   catch (error) {

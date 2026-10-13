@@ -1,29 +1,53 @@
 import { getD1 } from "@/db";
 import { runScheduledBooklySync } from "@/lib/bookly-scheduled";
-import { OBLIGATION_COST, obligationsDue, processBookingObligations } from "@/lib/booking-obligations";
+import { OBLIGATION_COST, processBookingObligations } from "@/lib/booking-obligations";
+import { MAX_REFUND_ATTEMPTS, REFUND_RETRY_COST, retryDueRefunds } from "@/lib/refunds";
 import { backgroundBudget, meteredDatabase, SubrequestBudget } from "@/lib/subrequest-budget";
 
 /** Subrequests kept for due refund and email obligations in every invocation,
- * so a long Bookly backlog can never starve them: at least one refund or one
- * email per minute. */
-export const OBLIGATION_RESERVE = Math.max(OBLIGATION_COST.refund, OBLIGATION_COST.notify);
+ * so a long Bookly backlog can never starve them: the due read plus at least
+ * one refund or one email per minute. */
+export const OBLIGATION_RESERVE = 1 + Math.max(OBLIGATION_COST.refund, OBLIGATION_COST.notify);
+/** Subrequests kept for one due refund retry (failed Bookly, late-payment or
+ * staff refunds), likewise never starved by a Bookly backlog. */
+export const REFUND_RESERVE = REFUND_RETRY_COST + 1;
 
 /** Cron Trigger body: one subrequest budget for the whole invocation. Bookly
  * synchronization runs first (fresh occupancy keeps online booking open) but,
- * when obligations are due, without their reserved share; obligations then
- * use what remains. Failures are logged and retried on the next minute.
+ * when obligations or refund retries are due, without their reserved share;
+ * they then use what remains. Refund retries run whether or not Bookly
+ * synchronization is enabled. Failures are logged and retried on the next
+ * minute.
  */
 export async function runScheduledTasks() {
   const total = backgroundBudget();
   const database = getD1();
-  let due = false;
-  try { due = await obligationsDue(meteredDatabase(database, total)); }
-  catch { console.error("Scheduled obligation check failed"); }
-  const bookly = new SubrequestBudget(total.remaining - (due ? OBLIGATION_RESERVE : 0));
+  let due = { obligations: 0, refunds: 0 };
+  try {
+    const now = Date.now();
+    due = await meteredDatabase(database, total).prepare(`SELECT
+        EXISTS(SELECT 1 FROM booking_obligations WHERE status = 'pending' AND next_attempt_at <= ?) AS obligations,
+        EXISTS(SELECT 1 FROM payment_refunds r JOIN appointments a ON a.id = r.appointment_id
+          WHERE r.status IN ('pending','failed') AND r.attempts < ? AND r.next_attempt_at <= ?
+            AND a.status = 'cancelled' AND a.payment_status = 'paid' AND a.payment_method = 'stripe') AS refunds`)
+      .bind(now, MAX_REFUND_ATTEMPTS, now).first<{ obligations: number; refunds: number }>() ?? due;
+  } catch { console.error("Scheduled work check failed"); }
+  // One reserve, never both: it must leave the Bookly snapshot affordable on the
+  // default budget. The obligation share also covers a refund retry.
+  const reserve = due.obligations ? OBLIGATION_RESERVE : due.refunds ? REFUND_RESERVE : 0;
+  const bookly = new SubrequestBudget(total.remaining - reserve);
   const outcome = await runScheduledBooklySync(bookly);
-  if (due) {
-    try { await processBookingObligations(database, { budget: new SubrequestBudget(total.remaining - bookly.used) }); }
+  let used = bookly.used;
+  if (due.obligations) {
+    const obligations = new SubrequestBudget(total.remaining - used);
+    try { await processBookingObligations(database, { budget: obligations }); }
     catch { console.error("Scheduled booking obligations failed"); }
+    used += obligations.used;
+  }
+  if (due.refunds) {
+    const refunds = new SubrequestBudget(total.remaining - used);
+    try { await retryDueRefunds(meteredDatabase(database, refunds), database, refunds); }
+    catch { console.error("Scheduled refund retries failed"); }
   }
   return outcome;
 }

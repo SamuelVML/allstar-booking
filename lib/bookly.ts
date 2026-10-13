@@ -5,7 +5,7 @@
 import { env } from "cloudflare:workers";
 import { z } from "zod";
 import { addMinutes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
-import { refundCancelledBooking } from "@/lib/refunds";
+import { recordRefundDue, refundCancelledBooking, retryDueRefunds } from "@/lib/refunds";
 import type { ManagedBooking } from "@/lib/booking-management";
 import { backgroundBudget, meteredDatabase, SubrequestBudget, SubrequestBudgetExhausted } from "@/lib/subrequest-budget";
 
@@ -57,6 +57,44 @@ type State = {
   status: string; customerName: string; customerEmail: string; customerPhone: string; notes: string; paymentStatus: string;
 };
 type Command = { id: string; localId: string; kind: "appointment" | "block"; expectedVersion: string; state: State };
+
+/** Records held for staff reconciliation (rejected commands Bookly will not
+ * accept as sent, and bookings both calendars changed). Each one is isolated
+ * so unrelated synchronization continues; beyond this many, synchronization
+ * stops and online booking fails closed, because the calendars may be
+ * diverging systematically. */
+export const MAX_HELD_CONFLICTS = 10;
+const LEASE_MS = 120_000;
+
+/** Statements that make a batch commit only while `lease` still owns the sync
+ * lease, renewing it in the same transaction. A worker whose lease expired or
+ * was taken over fails the CHECK constraint and its whole batch rolls back:
+ * no cancellation, slot release or refund record is written. */
+function leaseFence(database: D1Database, lease: string) {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  return {
+    open: [
+      database.prepare(`INSERT INTO bookly_revision_guards(id,valid)
+        SELECT ?, CASE WHEN EXISTS(SELECT 1 FROM bookly_sync_state WHERE id=1 AND lease=? AND lease_until > ?) THEN 1 ELSE 0 END`).bind(id, lease, now),
+      database.prepare("UPDATE bookly_sync_state SET lease_until=? WHERE id=1 AND lease=?").bind(now + LEASE_MS, lease),
+    ],
+    close: database.prepare("DELETE FROM bookly_revision_guards WHERE id=?").bind(id),
+  };
+}
+const isGuardFailure = (error: unknown) => error instanceof Error && error.message.includes("CHECK constraint");
+async function assertLeaseHeld(database: D1Database, lease: string) {
+  const state = await database.prepare("SELECT lease, lease_until FROM bookly_sync_state WHERE id=1").first<{ lease: string | null; lease_until: number }>();
+  if (state?.lease !== lease || state.lease_until <= Date.now()) throw new BooklyUnavailable("Calendar sync lease expired.");
+}
+
+/** Hold a record for staff reconciliation. The latest remote version is kept
+ * so staff can choose to keep the local version. */
+function recordConflict(database: D1Database, localId: string, reason: string, remote?: { remoteId: string; version: string | null }) {
+  return database.prepare(`INSERT INTO bookly_conflicts(local_id,remote_id,remote_version,reason) VALUES (?,?,?,?)
+    ON CONFLICT(local_id) DO UPDATE SET remote_id=COALESCE(excluded.remote_id,remote_id),remote_version=COALESCE(excluded.remote_version,remote_version),reason=excluded.reason`)
+    .bind(localId, remote?.remoteId ?? null, remote?.version ?? null, reason.slice(0, 300));
+}
 
 async function digest(value: unknown) {
   const result = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
@@ -151,9 +189,11 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
   const linkOf = (localId: string) => links.find(item => item.local_id === localId);
   const wanted = localIds ? new Set(localIds) : null;
   // A record with a pending command gets its newer state on the next pass, after
-  // delivery (the partial unique index would ignore the insert anyway).
-  const pending = new Set((await database.prepare("SELECT local_id FROM bookly_commands WHERE status='pending'").all<{ local_id: string }>()).results
-    .map(row => row.local_id));
+  // delivery (the partial unique index would ignore the insert anyway). A held
+  // record gets nothing until staff reconcile it, so no later change for it can
+  // overtake the held one; other records are unaffected.
+  const pending = new Set((await database.prepare(`SELECT local_id FROM bookly_commands WHERE status IN ('pending','held')
+    UNION SELECT local_id FROM bookly_conflicts`).all<{ local_id: string }>()).results.map(row => row.local_id));
   const inserts: D1PreparedStatement[] = [];
   const rows = (await database.prepare("SELECT * FROM appointments WHERE source != 'bookly'").all<Row>()).results;
   for (const row of rows) {
@@ -177,7 +217,7 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
  * plugin keys idempotency on the command ID and payload hash, so a second
  * delivery returns the original receipt instead of writing twice.
  */
-async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget) {
+async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget, lease?: string) {
   budget?.charge(1); // the Bookly request; its D1 writes are metered by the caller's handle
   try {
     const command = JSON.parse(row.payload) as Command;
@@ -190,21 +230,79 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
       .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind));
     await database.batch(statements);
   } catch (error) {
-    const command = JSON.parse(row.payload) as Command;
-    if (error instanceof BooklyConflict && command.kind === "appointment" && !command.expectedVersion) {
-      const booking = await database.prepare("SELECT source,booking_request_id,payment_status FROM appointments WHERE id=?").bind(row.local_id)
-        .first<{ source: string; booking_request_id: string | null; payment_status: string }>();
-      if (booking && (booking.booking_request_id || booking.source === "walk_in") && booking.payment_status !== "paid") {
-        await database.batch([
-          database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=?").bind(row.local_id),
-          database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(row.local_id),
-          database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=?").bind(row.id),
-        ]);
-      }
+    if (!(error instanceof BooklyConflict)) {
+      await database.prepare("UPDATE bookly_commands SET error = 'unavailable' WHERE id = ?").bind(row.id).run();
+      throw error;
     }
-    await database.prepare("UPDATE bookly_commands SET error = ? WHERE id = ?").bind(error instanceof BooklyConflict ? "conflict" : "unavailable", row.id).run();
+    if (budget && !budget.canAfford(SETTLE_COST)) {
+      // Settled by the next run, which replays attempted commands first.
+      await database.prepare("UPDATE bookly_commands SET error = 'conflict' WHERE id = ?").bind(row.id).run();
+      throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run settles the rejected command.");
+    }
+    await settleRejectedCommand(database, row, JSON.parse(row.payload) as Command, lease);
     throw error;
   }
+}
+
+/** Bookly rejected a command. Never leave the local calendar claiming what
+ * Bookly refused:
+ * - an unpaid new hold (website request or walk-in) is cancelled;
+ * - a staff reschedule is moved back to its previous time, audited as a
+ *   reversal, unless anything changed since or the old time is taken;
+ * - anything else is held for staff reconciliation (GET /api/admin/bookly),
+ *   so it is not retried every run and blocks no unrelated command.
+ * With a lease (background sync) every booking write is fenced on it.
+ */
+async function settleRejectedCommand(database: D1Database, row: CommandRow, command: Command, lease?: string) {
+  const fence = lease ? leaseFence(database, lease) : null;
+  const fenced = async (statements: D1PreparedStatement[]) => {
+    try { await database.batch(fence ? [...fence.open, ...statements, fence.close] : statements); return true; }
+    catch (error) {
+      if (lease && isGuardFailure(error)) await assertLeaseHeld(database, lease);
+      if (error instanceof Error && /CHECK constraint|UNIQUE constraint|Slot unavailable/.test(error.message)) return false;
+      throw error;
+    }
+  };
+  if (command.kind === "appointment") {
+    const booking = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(row.local_id).first<Row & { booking_request_id: string | null }>();
+    if (booking && !command.expectedVersion && (booking.booking_request_id || booking.source === "walk_in") && booking.payment_status !== "paid") {
+      if (await fenced([
+        database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=? AND revision=?").bind(row.local_id, booking.revision),
+        database.prepare("DELETE FROM appointment_slots WHERE appointment_id=? AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND revision=? AND status='cancelled')")
+          .bind(row.local_id, row.local_id, booking.revision + 1),
+        database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=? AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND revision=?)")
+          .bind(row.id, row.local_id, booking.revision + 1),
+      ]) && (await database.prepare("SELECT status FROM bookly_commands WHERE id=?").bind(row.id).first<{ status: string }>())?.status === "rejected") return;
+    }
+    const move = booking && command.expectedVersion && await database.prepare(`SELECT * FROM booking_changes WHERE appointment_id=? AND revision=? AND action='reschedule' AND new_date=? AND new_time=?`)
+      .bind(booking.id, booking.revision, command.state.date, command.state.time)
+      .first<{ id: string; revision: number; previous_date: string; previous_time: string; new_date: string; new_time: string }>();
+    if (booking && move && booking.status === "confirmed" && booking.appointment_date === move.new_date && booking.start_time === move.new_time) {
+      const guard = crypto.randomUUID();
+      const reversal = crypto.randomUUID();
+      const restored = await fenced([
+        database.prepare(`INSERT INTO bookly_revision_guards(id,valid) SELECT ?, CASE WHEN EXISTS(SELECT 1 FROM appointments
+          WHERE id=? AND revision=? AND status='confirmed' AND appointment_date=? AND start_time=?) THEN 1 ELSE 0 END`)
+          .bind(guard, booking.id, booking.revision, move.new_date, move.new_time),
+        database.prepare(`INSERT INTO booking_changes (id, appointment_id, revision, action, actor_id, previous_date, previous_time, new_date, new_time)
+          VALUES (?, ?, ?, 'reschedule', 'bookly-rejected', ?, ?, ?, ?)`)
+          .bind(reversal, booking.id, booking.revision + 1, move.new_date, move.new_time, move.previous_date, move.previous_time),
+        database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(booking.id),
+        ...makeSlotKeys(move.previous_date, move.previous_time, booking.duration_minutes + booking.handling_minutes).map(slot =>
+          database.prepare("INSERT INTO appointment_slots (slot_start, appointment_id) VALUES (?, ?)").bind(slot, booking.id)),
+        database.prepare("UPDATE appointments SET appointment_date=?,start_time=?,end_time=?,revision=revision+1 WHERE id=? AND revision=?")
+          .bind(move.previous_date, move.previous_time, addMinutes(move.previous_time, booking.duration_minutes), booking.id, booking.revision),
+        database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=?").bind(row.id),
+        database.prepare("DELETE FROM bookly_revision_guards WHERE id=?").bind(guard),
+      ]);
+      if (restored) return;
+    }
+  }
+  const link = await database.prepare("SELECT remote_id FROM bookly_links WHERE local_id=?").bind(row.local_id).first<{ remote_id: string }>();
+  await fenced([
+    database.prepare("UPDATE bookly_commands SET status='held',error='conflict' WHERE id=? AND status='pending'").bind(row.id),
+    recordConflict(database, row.local_id, "Bookly rejected this change. Choose which version to keep.", link ? { remoteId: link.remote_id, version: null } : undefined),
+  ]);
 }
 
 /** Commands delivered per background run, across both drain phases. A larger
@@ -215,15 +313,19 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
 const DRAIN_BATCH = 100;
 type DrainBudget = { remaining: number };
 /** Worst-case subrequests for one command: lease renewal, the Bookly request,
- * and on failure a lookup, a batch and the error update. */
+ * and on failure a lookup, a batch and the error update. Settling a rejection
+ * costs SETTLE_COST more, checked when it happens. */
 const COMMAND_COST = 5;
+/** Booking and change lookups, the restoring batch, the link lookup, the
+ * holding batch and a lease check after each batch. */
+const SETTLE_COST = 7;
 /** Worst-case subrequests for one Stripe refund: refund-record read, upsert and
  * final write in D1, plus the Checkout Session lookup and refund in Stripe. */
 const REFUND_COST = 6;
 /** Fixed cost of a run after the first drain: links, snapshot, appointment
  * preload, lease renewal, occupancy, export (4 reads + batches), second drain
- * read, refund sweep read and the success write, with margin. */
-const SNAPSHOT_RESERVE = 18;
+ * read, held count, refund sweep read and the success write, with margin. */
+const SNAPSHOT_RESERVE = 19;
 // Commands already attempted (error set) replay first: their write may have
 // reached Bookly, and the snapshot cannot be matched until they are linked.
 // Fresh commands keep appointments before time off, oldest first.
@@ -244,7 +346,10 @@ async function drain(database: D1Database, lease: string, cap: DrainBudget, budg
     const renewed = await database.prepare("UPDATE bookly_sync_state SET lease_until=? WHERE id=1 AND lease=? AND lease_until > ?")
       .bind(Date.now()+120_000,lease,Date.now()).run();
     if (renewed.meta.changes !== 1) throw new BooklyUnavailable("Calendar sync lease expired.");
-    await sendCommand(database, row, budget);
+    // A rejected command is settled (restored or held) inside sendCommand and
+    // never stops the queue; an unreachable Bookly does.
+    try { await sendCommand(database, row, budget, lease); }
+    catch (error) { if (!(error instanceof BooklyConflict)) throw error; }
   }
 }
 
@@ -252,7 +357,7 @@ async function drain(database: D1Database, lease: string, cap: DrainBudget, budg
  * never stop between its refund record and the Stripe call. */
 async function refundWithin(budget: SubrequestBudget, raw: D1Database, booking: Row) {
   budget.charge(REFUND_COST);
-  await refundCancelledBooking(raw, booking, "bookly-sync");
+  await refundCancelledBooking(raw, booking, "bookly-sync", { automatic: true });
 }
 
 /** Write local changes to Bookly without taking a snapshot or the sync lease.
@@ -274,10 +379,19 @@ export async function pushBooklyChanges(database: D1Database, localIds: string[]
     const pending = (await (localIds
       ? database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' AND local_id IN (SELECT value FROM json_each(?)) ${PENDING_ORDER}`).bind(JSON.stringify(localIds))
       : database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' ${PENDING_ORDER} LIMIT 101`)).all<CommandRow>()).results;
-    if (!pending.length) return;
+    if (!pending.length) break;
     if (pending.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Background synchronization delivers it in batches.");
-    for (const row of pending) await sendCommand(database, row);
+    // A rejection settles that record only; the others are still delivered.
+    let rejected: BooklyConflict | null = null;
+    for (const row of pending) {
+      try { await sendCommand(database, row); }
+      catch (error) { if (error instanceof BooklyConflict) rejected = error; else throw error; }
+    }
+    if (rejected && localIds) throw rejected;
   }
+  // A requested record held for reconciliation was not written to Bookly.
+  if (localIds && await database.prepare(`SELECT 1 FROM bookly_commands WHERE status='held' AND local_id IN (SELECT value FROM json_each(?)) LIMIT 1`)
+    .bind(JSON.stringify(localIds)).first()) throw new BooklyConflict("The appointment changed in Bookly. Staff must reconcile it before it can sync.");
 }
 
 /** For committed staff changes: refunds and notifications must still run, so
@@ -294,7 +408,22 @@ export async function pushAfterCommit(database: D1Database, localIds: string[] |
   }
 }
 
-type SyncContext = { budget: SubrequestBudget; raw: D1Database };
+type SyncContext = { budget: SubrequestBudget; raw: D1Database; lease: string };
+/** A row edited locally while this run adopted it: skipped this run, compared
+ * again by the next snapshot. */
+class LocalEditRace extends BooklyConflict {}
+
+/** Run a booking batch fenced on the sync lease. A failed guard is either a
+ * lost lease (stop the run) or a concurrent local edit. */
+async function fencedBatch(database: D1Database, lease: string, statements: D1PreparedStatement[]) {
+  const fence = leaseFence(database, lease);
+  try { await database.batch([...fence.open, ...statements, fence.close]); }
+  catch (error) {
+    if (!isGuardFailure(error)) throw error;
+    await assertLeaseHeld(database, lease);
+    throw new LocalEditRace("A local edit raced with Bookly synchronization.");
+  }
+}
 
 async function adopt(database: D1Database, remote: Remote, link: Link | undefined, preloaded: Map<string, Row>, context: SyncContext) {
   if (remote.kind === "block") {
@@ -310,12 +439,13 @@ async function adopt(database: D1Database, remote: Remote, link: Link | undefine
     if (await digest(local) !== link.local_digest) throw new BooklyConflict("Both calendars changed the same time off.");
     const removed = remote.status === "cancelled";
     const state = { ...local,date:remote.date,time:remote.time,durationMinutes:remote.durationMinutes,notes:remote.notes,status:removed ? "removed":"confirmed" };
-    await database.batch([
+    await fencedBatch(database, context.lease, [
       database.prepare("UPDATE time_off SET date=?,start_time=?,end_time=?,reason=?,removed_at=?,removed_by=? WHERE id=?")
         .bind(remote.date,remote.time,remote.endTime,remote.notes,removed ? new Date().toISOString():null,removed ? "bookly-sync":null,blockId),
       database.prepare("DELETE FROM time_off_slots WHERE time_off_id=?").bind(blockId),
       ...(!removed ? makeSlotKeys(remote.date,remote.time,remote.durationMinutes).map(slot => database.prepare("INSERT INTO time_off_slots(slot_start,time_off_id) VALUES (?,?)").bind(slot,blockId)):[]),
       database.prepare("UPDATE bookly_links SET remote_version=?,local_digest=? WHERE local_id=?").bind(remote.version,await digest(state),link.local_id),
+      database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(link.local_id),
     ]);
     return;
   }
@@ -366,14 +496,15 @@ async function adopt(database: D1Database, remote: Remote, link: Link | undefine
     ON CONFLICT(local_id) DO UPDATE SET remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
     .bind(id,remote.remoteId,remote.version,localDigest));
   if (current) statements.push(database.prepare("DELETE FROM bookly_revision_guards WHERE id=?").bind(guard));
-  // A cancellation and its refund are one unit: reserve both before writing.
+  statements.push(database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(id));
+  // A cancellation and its refund are one unit: reserve both before writing,
+  // and record the refund as due in the cancelling transaction.
   const refund = cancelled && current;
-  if (!context.budget.canAfford(1 + (refund ? REFUND_COST : 0))) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
-  try { await database.batch(statements); }
-  catch (error) {
-    if (error instanceof Error && error.message.includes("CHECK constraint")) throw new BooklyConflict("A local edit raced with Bookly synchronization.");
-    throw error;
-  }
+  if (refund) statements.push(recordRefundDue(database, current, "bookly-sync"));
+  if (!context.budget.canAfford(1 + 1 + (refund ? REFUND_COST : 0))) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
+  // Fenced: a worker that lost its lease writes nothing, so it can neither
+  // cancel the booking nor make its refund due.
+  await fencedBatch(database, context.lease, statements);
   if (refund) await refundWithin(context.budget, context.raw, current);
 }
 
@@ -388,8 +519,8 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
   // invocation's subrequest budget. Closing writes use the raw handle (the
   // budget's closing reserve). Work stops at a safe boundary and resumes.
   const database = meteredDatabase(raw, budget);
-  const context: SyncContext = { budget, raw };
   const lease = crypto.randomUUID();
+  const context: SyncContext = { budget, raw, lease };
   const acquired = await database.prepare("UPDATE bookly_sync_state SET lease=?,lease_until=? WHERE id=1 AND lease_until < ?")
     .bind(lease, Date.now() + 120_000, Date.now()).run();
   if (acquired.meta.changes !== 1) throw new BooklyUnavailable("Calendar synchronization is in progress. Try again shortly.");
@@ -418,6 +549,8 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
     ])];
     const preloaded = new Map((await database.prepare("SELECT * FROM appointments WHERE id IN (SELECT value FROM json_each(?))")
       .bind(JSON.stringify(candidateIds)).all<Row>()).results.map(row => [row.id, row]));
+    // Conflicts found in this run, written with the occupancy batch.
+    const conflicts: D1PreparedStatement[] = [];
     for (const remote of snapshot.appointments) {
       let link = links.find(item => item.remote_id === remote.remoteId);
       if (remote.localId && !link) {
@@ -430,7 +563,14 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
       // while it still occupies today or a future day. Occupancy below still
       // reads every active snapshot row.
       if (!link && !remote.localId && (remote.date < today || !["confirmed","payment_pending","completed"].includes(remote.status))) continue;
-      await adopt(database, remote, link, preloaded, context);
+      // A conflict on one booking is held for staff and never stops the run;
+      // its Bookly occupancy is still applied below.
+      try { await adopt(database, remote, link, preloaded, context); }
+      catch (error) {
+        if (error instanceof LocalEditRace) continue;
+        if (!(error instanceof BooklyConflict)) throw error;
+        conflicts.push(recordConflict(database, link?.local_id ?? remote.localId ?? `bookly-${remote.remoteId}`, error.message, remote));
+      }
     }
     // Refresh the lease between network phases. Each remote request has a
     // 25-second timeout; loss of lease stops delivery before another write.
@@ -443,19 +583,37 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
       const listed = preloaded.get(link.local_id);
       if (listed?.source === "bookly" && listed.appointment_date < snapshot.scopeFrom) continue;
       if (listed && !["cancelled","payment_expired"].includes(listed.status)) {
-        // Cancellation, refund and link update are one unit: reserve all of it.
-        if (!budget.canAfford(1 + 1 + REFUND_COST + 2)) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
+        // Cancellation, slot release, refund record and link update are one
+        // unit: reserve all of it, and commit it only for the exact revision
+        // compared here, under this run's lease.
+        if (!budget.canAfford(1 + 1 + 1 + REFUND_COST + 2)) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
         const current = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(link.local_id).first<Row>();
         if (!current || ["cancelled","payment_expired"].includes(current.status)) continue;
-        if (await digest(stateOf(current)) !== link.local_digest) throw new BooklyConflict("A changed booking was deleted in Bookly.");
-        await database.batch([
-          database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=? AND revision=?").bind(current.id,current.revision),
-          database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(current.id),
-        ]);
+        const remote = { remoteId: link.remote_id, version: "deleted" };
+        if (await digest(stateOf(current)) !== link.local_digest) {
+          conflicts.push(recordConflict(database, current.id, "A booking changed locally was deleted in Bookly.", remote));
+          continue;
+        }
+        const guard = crypto.randomUUID();
+        try {
+          await fencedBatch(database, lease, [
+            database.prepare(`INSERT INTO bookly_revision_guards(id,valid) SELECT ?, CASE WHEN EXISTS(SELECT 1 FROM appointments
+              WHERE id=? AND revision=? AND status=? AND payment_status=?) THEN 1 ELSE 0 END`).bind(guard,current.id,current.revision,current.status,current.payment_status),
+            database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=? AND revision=?").bind(current.id,current.revision),
+            database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(current.id),
+            recordRefundDue(database, current, "bookly-sync"),
+            database.prepare("UPDATE bookly_links SET remote_version='deleted',local_digest=? WHERE local_id=?")
+              .bind(await digest(stateOf({ ...current, status: "cancelled" })),current.id),
+            database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(current.id),
+            database.prepare("DELETE FROM bookly_revision_guards WHERE id=?").bind(guard),
+          ]);
+        } catch (error) {
+          // Edited after the comparison: keep the booking and its slots.
+          if (!(error instanceof LocalEditRace)) throw error;
+          conflicts.push(recordConflict(database, current.id, "A booking changed locally while it was deleted in Bookly.", remote));
+          continue;
+        }
         await refundWithin(budget, raw, current);
-        const terminal = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(current.id).first<Row>();
-        if (terminal) await database.prepare("UPDATE bookly_links SET remote_version='deleted',local_digest=? WHERE local_id=?")
-          .bind(await digest(stateOf(terminal)),current.id).run();
       }
     }
     const occupancy: D1PreparedStatement[] = [database.prepare("DELETE FROM bookly_occupied_slots")];
@@ -473,19 +631,19 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
         occupancy.push(database.prepare("INSERT OR IGNORE INTO bookly_occupied_slots(slot_start,appointment_id) VALUES (?,?)").bind(slot,id));
       }
     }
-    await database.batch(occupancy);
+    await fencedBatch(database, lease, [...occupancy, ...conflicts]);
     await enqueueLocal(database, null, today);
-    // Remaining budget after the sweep read and the success write.
-    await drain(database, lease, cap, budget, 2);
-    const refunds = (await database.prepare(`SELECT a.* FROM appointments a JOIN payment_refunds r ON r.appointment_id=a.id
-      WHERE a.status='cancelled' AND a.payment_method='stripe' AND a.payment_status='paid' AND r.status='pending'`).all<Row>()).results;
-    // Retries left over stay pending for the next run.
-    for (const booking of refunds) {
-      if (!budget.canAfford(REFUND_COST + 1)) break;
-      await refundWithin(budget, raw, booking);
-    }
-    await database.prepare("UPDATE bookly_sync_state SET last_success=?,error=NULL WHERE id=1 AND lease=?")
-      .bind(snapshotRequestedAt,lease).run();
+    // Remaining budget after the held count, the sweep read and the success write.
+    await drain(database, lease, cap, budget, 3);
+    // Isolation is bounded: many held records suggest the calendars are
+    // diverging, so stop and let availability fail closed.
+    const held = await database.prepare(`SELECT COUNT(*) AS n FROM (SELECT local_id FROM bookly_commands WHERE status='held' UNION SELECT local_id FROM bookly_conflicts)`)
+      .first<{ n: number }>();
+    if ((held?.n ?? 0) > MAX_HELD_CONFLICTS) throw new BooklyConflict(`${held!.n} records are held for staff reconciliation; synchronization stops until they are resolved.`);
+    // Due refunds of any origin, with backoff; the rest stay due for the next run.
+    await retryDueRefunds(database, raw, budget, 20, 1);
+    await database.prepare("UPDATE bookly_sync_state SET last_success=?,error=? WHERE id=1 AND lease=?")
+      .bind(snapshotRequestedAt,held?.n ? "held" : null,lease).run();
   } catch (error) {
     if (error instanceof SubrequestBudgetExhausted) {
       await raw.prepare("UPDATE bookly_sync_state SET error='budget' WHERE id=1 AND lease=?").bind(lease).run();
@@ -496,4 +654,37 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
   } finally {
     await raw.prepare("UPDATE bookly_sync_state SET lease=NULL,lease_until=0 WHERE id=1 AND lease=?").bind(lease).run();
   }
+}
+
+/** Staff reconciliation of a held record (POST /api/admin/bookly, "resolve").
+ * - "bookly": drop the local change; the next sync adopts Bookly's version
+ *   (or, if Bookly deleted the booking, cancels and refunds it locally).
+ * - "local": drop the rejected command; the next sync writes the local version
+ *   over Bookly's latest one (or recreates it), and Bookly still arbitrates the
+ *   time slot.
+ */
+export async function resolveBooklyConflict(database: D1Database, localId: string, keep: "bookly" | "local") {
+  const conflict = await database.prepare("SELECT remote_version FROM bookly_conflicts WHERE local_id=?").bind(localId).first<{ remote_version: string | null }>();
+  const held = await database.prepare("SELECT 1 FROM bookly_commands WHERE local_id=? AND status='held'").bind(localId).first();
+  if (!conflict && !held) return { ok: false as const, error: "Nothing is held for this record." };
+  const statements = [database.prepare("UPDATE bookly_commands SET status='discarded' WHERE local_id=? AND status IN ('held','pending')").bind(localId)];
+  if (keep === "local") {
+    if (!conflict?.remote_version) return { ok: false as const, error: "Synchronize once so the latest Bookly version is known, then try again." };
+    statements.push(conflict.remote_version === "deleted"
+      ? database.prepare("DELETE FROM bookly_links WHERE local_id=?").bind(localId)
+      : database.prepare("UPDATE bookly_links SET remote_version=?,local_digest='' WHERE local_id=?").bind(conflict.remote_version, localId));
+  } else {
+    let state: State | null = null;
+    if (localId.startsWith("block-")) {
+      const block = await database.prepare("SELECT * FROM time_off WHERE id=?").bind(localId.slice(6)).first<TimeOffRow>();
+      if (block) state = blockState(block);
+    } else {
+      const row = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(localId).first<Row>();
+      if (row) state = stateOf(row);
+    }
+    if (state) statements.push(database.prepare("UPDATE bookly_links SET remote_version='',local_digest=? WHERE local_id=?").bind(await digest(state), localId));
+  }
+  statements.push(database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(localId));
+  await database.batch(statements);
+  return { ok: true as const };
 }
