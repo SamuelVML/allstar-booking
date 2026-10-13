@@ -24,7 +24,9 @@ const database = {
 };
 
 /* ------------------------------------------------------------ Bookly double */
-const env = { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.example.test/wp-json/allstar-bookly/v1', BOOKLY_BRIDGE_SECRET: 'x'.repeat(40) };
+// A paid-plan budget, so the 100-commands-per-run cap is what binds here; the
+// default (Workers Free) budget is exercised in tests/bookly-budget.mjs.
+const env = { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.example.test/wp-json/allstar-bookly/v1', BOOKLY_BRIDGE_SECRET: 'x'.repeat(40), BOOKLY_SUBREQUEST_BUDGET: '900' };
 const remote = new Map(); const receipts = new Map(); let nextId = 500;
 const calls = { snapshot: 0, availability: 0, command: 0 };
 let bridgeDown = false; let commandsDown = false; let downAtCommand = null; let beforeCommand = null; let loseResponse = null;

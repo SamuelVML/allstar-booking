@@ -7,6 +7,7 @@ import { z } from "zod";
 import { addMinutes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
 import { refundCancelledBooking } from "@/lib/refunds";
 import type { ManagedBooking } from "@/lib/booking-management";
+import { backgroundBudget, meteredDatabase, SubrequestBudget, SubrequestBudgetExhausted } from "@/lib/subrequest-budget";
 
 type BridgeEnv = { BOOKLY_SYNC_ENABLED?: string; BOOKLY_BRIDGE_URL?: string; BOOKLY_BRIDGE_SECRET?: string };
 const environment = () => env as unknown as BridgeEnv;
@@ -111,10 +112,10 @@ export async function filterBooklyTimes(serviceId: string, durationMinutes: numb
 
 async function enqueue(database: D1Database, localId: string, kind: "appointment" | "block", state: State, link?: Link) {
   const localDigest = await digest(state);
-  if (link?.local_digest === localDigest) return;
+  if (link?.local_digest === localDigest) return null;
   const command: Command = { id: crypto.randomUUID(), localId, kind, state, expectedVersion: link?.remote_version ?? "" };
-  await database.prepare("INSERT OR IGNORE INTO bookly_commands(id, local_id, payload, digest) VALUES (?, ?, ?, ?)")
-    .bind(command.id, localId, JSON.stringify(command), localDigest).run();
+  return database.prepare("INSERT OR IGNORE INTO bookly_commands(id, local_id, payload, digest) VALUES (?, ?, ?, ?)")
+    .bind(command.id, localId, JSON.stringify(command), localDigest);
 }
 
 type TimeOffRow = { id: string; date: string; start_time: string; end_time: string; reason: string; removed_at: string | null };
@@ -142,30 +143,42 @@ function exportableBlock(block: TimeOffRow, link: Link | undefined, today: strin
   return blockState(block);
 }
 
+/** Statements per enqueue batch; each batch is one D1 request. */
+const ENQUEUE_CHUNK = 50;
+
 async function enqueueLocal(database: D1Database, localIds: string[] | null, today: string) {
   const links = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
   const linkOf = (localId: string) => links.find(item => item.local_id === localId);
   const wanted = localIds ? new Set(localIds) : null;
+  // A record with a pending command gets its newer state on the next pass, after
+  // delivery (the partial unique index would ignore the insert anyway).
+  const pending = new Set((await database.prepare("SELECT local_id FROM bookly_commands WHERE status='pending'").all<{ local_id: string }>()).results
+    .map(row => row.local_id));
+  const inserts: D1PreparedStatement[] = [];
   const rows = (await database.prepare("SELECT * FROM appointments WHERE source != 'bookly'").all<Row>()).results;
   for (const row of rows) {
-    if (wanted && !wanted.has(row.id)) continue;
+    if ((wanted && !wanted.has(row.id)) || pending.has(row.id)) continue;
     const state = exportableAppointment(row, linkOf(row.id), today);
-    if (state) await enqueue(database, row.id, "appointment", state, linkOf(row.id));
+    const insert = state && await enqueue(database, row.id, "appointment", state, linkOf(row.id));
+    if (insert) inserts.push(insert);
   }
   const blocks = (await database.prepare("SELECT * FROM time_off").all<TimeOffRow>()).results;
   for (const block of blocks) {
     const localId = `block-${block.id}`;
-    if (wanted && !wanted.has(localId)) continue;
+    if ((wanted && !wanted.has(localId)) || pending.has(localId)) continue;
     const state = exportableBlock(block, linkOf(localId), today);
-    if (state) await enqueue(database, localId, "block", state, linkOf(localId));
+    const insert = state && await enqueue(database, localId, "block", state, linkOf(localId));
+    if (insert) inserts.push(insert);
   }
+  for (let start = 0; start < inserts.length; start += ENQUEUE_CHUNK) await database.batch(inserts.slice(start, start + ENQUEUE_CHUNK));
 }
 
 /** Deliver one stored command. Safe to call concurrently for the same row: the
  * plugin keys idempotency on the command ID and payload hash, so a second
  * delivery returns the original receipt instead of writing twice.
  */
-async function sendCommand(database: D1Database, row: CommandRow) {
+async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget) {
+  budget?.charge(1); // the Bookly request; its D1 writes are metered by the caller's handle
   try {
     const command = JSON.parse(row.payload) as Command;
     const result = z.object({ remoteId: z.string().regex(/^\d+$/).nullable(), version: z.string(), terminal: z.boolean().optional() })
@@ -197,26 +210,49 @@ async function sendCommand(database: D1Database, row: CommandRow) {
 /** Commands delivered per background run, across both drain phases. A larger
  * backlog (initial export, long outage) drains over successive runs: delivered
  * commands are marked done as they succeed, so an interrupted run never repeats
- * or loses progress.
+ * or loses progress. The subrequest budget usually binds first.
  */
 const DRAIN_BATCH = 100;
 type DrainBudget = { remaining: number };
+/** Worst-case subrequests for one command: lease renewal, the Bookly request,
+ * and on failure a lookup, a batch and the error update. */
+const COMMAND_COST = 5;
+/** Worst-case subrequests for one Stripe refund: refund-record read, upsert and
+ * final write in D1, plus the Checkout Session lookup and refund in Stripe. */
+const REFUND_COST = 6;
+/** Fixed cost of a run after the first drain: links, snapshot, appointment
+ * preload, lease renewal, occupancy, export (4 reads + batches), second drain
+ * read, refund sweep read and the success write, with margin. */
+const SNAPSHOT_RESERVE = 18;
 // Commands already attempted (error set) replay first: their write may have
 // reached Bookly, and the snapshot cannot be matched until they are linked.
 // Fresh commands keep appointments before time off, oldest first.
 const PENDING_ORDER = "ORDER BY (error IS NULL), (json_extract(payload,'$.kind') = 'block'), created_at, id";
 
-async function drain(database: D1Database, lease: string, budget: DrainBudget) {
-  if (budget.remaining <= 0) return;
+/** Deliver pending commands while both the per-run command cap and the
+ * subrequest budget allow, keeping `reserve` subrequests for the rest of the
+ * run. Stops between commands, never inside one. */
+async function drain(database: D1Database, lease: string, cap: DrainBudget, budget: SubrequestBudget, reserve: number) {
+  const affordable = Math.floor((budget.remaining - 1 - reserve) / COMMAND_COST);
+  const limit = Math.min(cap.remaining, affordable);
+  if (limit <= 0) return;
   const rows = (await database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' ${PENDING_ORDER} LIMIT ?`)
-    .bind(budget.remaining).all<CommandRow>()).results;
+    .bind(limit).all<CommandRow>()).results;
   for (const row of rows) {
-    budget.remaining -= 1;
+    if (!budget.canAfford(COMMAND_COST + reserve)) return;
+    cap.remaining -= 1;
     const renewed = await database.prepare("UPDATE bookly_sync_state SET lease_until=? WHERE id=1 AND lease=? AND lease_until > ?")
       .bind(Date.now()+120_000,lease,Date.now()).run();
     if (renewed.meta.changes !== 1) throw new BooklyUnavailable("Calendar sync lease expired.");
-    await sendCommand(database, row);
+    await sendCommand(database, row, budget);
   }
+}
+
+/** Charge a refund up front, then run it on the unmetered handle so it can
+ * never stop between its refund record and the Stripe call. */
+async function refundWithin(budget: SubrequestBudget, raw: D1Database, booking: Row) {
+  budget.charge(REFUND_COST);
+  await refundCancelledBooking(raw, booking, "bookly-sync");
 }
 
 /** Write local changes to Bookly without taking a snapshot or the sync lease.
@@ -258,7 +294,9 @@ export async function pushAfterCommit(database: D1Database, localIds: string[] |
   }
 }
 
-async function adopt(database: D1Database, remote: Remote, link?: Link) {
+type SyncContext = { budget: SubrequestBudget; raw: D1Database };
+
+async function adopt(database: D1Database, remote: Remote, link: Link | undefined, preloaded: Map<string, Row>, context: SyncContext) {
   if (remote.kind === "block") {
     if (!link) throw new BooklyUnavailable("Unrecognized Bookly time-off mapping.");
     if (link.remote_version === remote.version) return;
@@ -282,7 +320,8 @@ async function adopt(database: D1Database, remote: Remote, link?: Link) {
     return;
   }
   const id = link?.local_id ?? remote.localId ?? `bookly-${remote.remoteId}`;
-  const current = await database.prepare("SELECT * FROM appointments WHERE id = ?").bind(id).first<Row>();
+  // Preloaded once per run; the revision guard below rejects a row edited since.
+  const current = preloaded.get(id) ?? null;
   if (current && link && await digest(stateOf(current)) !== link.local_digest) {
     if (remote.version !== link.remote_version) throw new BooklyConflict("Both calendars changed the same booking. Staff reconciliation is required.");
     return; // Local change is queued after this snapshot.
@@ -327,12 +366,15 @@ async function adopt(database: D1Database, remote: Remote, link?: Link) {
     ON CONFLICT(local_id) DO UPDATE SET remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
     .bind(id,remote.remoteId,remote.version,localDigest));
   if (current) statements.push(database.prepare("DELETE FROM bookly_revision_guards WHERE id=?").bind(guard));
+  // A cancellation and its refund are one unit: reserve both before writing.
+  const refund = cancelled && current;
+  if (!context.budget.canAfford(1 + (refund ? REFUND_COST : 0))) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
   try { await database.batch(statements); }
   catch (error) {
     if (error instanceof Error && error.message.includes("CHECK constraint")) throw new BooklyConflict("A local edit raced with Bookly synchronization.");
     throw error;
   }
-  if (cancelled && current) await refundCancelledBooking(database, current, "bookly-sync");
+  if (refund) await refundWithin(context.budget, context.raw, current);
 }
 
 /** Full bounded reconciliation. Runs in the background only: the Worker Cron
@@ -340,27 +382,42 @@ async function adopt(database: D1Database, remote: Remote, link?: Link) {
  * paths use assertBooklyFresh and pushBooklyChanges instead.
  * Lease owner checks prevent a second Worker from draining the same queue.
  */
-export async function synchronizeBookly(database: D1Database) {
+export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudget = backgroundBudget()) {
   if (!booklyEnabled()) return;
+  // Every D1 call and Bookly or Stripe request below is charged to the
+  // invocation's subrequest budget. Closing writes use the raw handle (the
+  // budget's closing reserve). Work stops at a safe boundary and resumes.
+  const database = meteredDatabase(raw, budget);
+  const context: SyncContext = { budget, raw };
   const lease = crypto.randomUUID();
   const acquired = await database.prepare("UPDATE bookly_sync_state SET lease=?,lease_until=? WHERE id=1 AND lease_until < ?")
     .bind(lease, Date.now() + 120_000, Date.now()).run();
   if (acquired.meta.changes !== 1) throw new BooklyUnavailable("Calendar synchronization is in progress. Try again shortly.");
   try {
     const today = getTodayInEindhoven();
-    const budget: DrainBudget = { remaining: DRAIN_BATCH };
+    const cap: DrainBudget = { remaining: DRAIN_BATCH };
     // Replay uncertain writes before comparing snapshots, using the exact stored
     // payload and command ID, so a lost HTTP response never creates a duplicate.
-    await drain(database, lease, budget);
+    // Keep enough budget for the snapshot: fresh occupancy keeps booking open.
+    await drain(database, lease, cap, budget, SNAPSHOT_RESERVE);
     // Read links before requesting the snapshot. Request paths can link new
     // bookings concurrently; only links that existed before the snapshot was
     // requested may be inferred deleted when the snapshot lacks them.
     const links = (await database.prepare("SELECT * FROM bookly_links").all<Link>()).results;
     // Occupancy age counts from the moment the snapshot was requested.
     const snapshotRequestedAt = new Date().toISOString();
+    budget.charge(1);
     const snapshot = z.object({ complete: z.literal(true), scopeFrom: z.string().refine(dateIsValid), appointments: z.array(remoteSchema).max(5000) })
       .parse(await booklyRequest("snapshot", {}));
     if (new Set(snapshot.appointments.map(row => row.remoteId)).size !== snapshot.appointments.length) throw new BooklyUnavailable("Duplicate Bookly IDs.");
+    // One read for every local appointment the snapshot can touch (adoption and
+    // deletion inference), instead of one read per row.
+    const candidateIds = [...new Set([
+      ...snapshot.appointments.map(remote => links.find(item => item.remote_id === remote.remoteId)?.local_id ?? remote.localId ?? `bookly-${remote.remoteId}`),
+      ...links.filter(item => item.kind === "appointment").map(item => item.local_id),
+    ])];
+    const preloaded = new Map((await database.prepare("SELECT * FROM appointments WHERE id IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(candidateIds)).all<Row>()).results.map(row => [row.id, row]));
     for (const remote of snapshot.appointments) {
       let link = links.find(item => item.remote_id === remote.remoteId);
       if (remote.localId && !link) {
@@ -373,7 +430,7 @@ export async function synchronizeBookly(database: D1Database) {
       // while it still occupies today or a future day. Occupancy below still
       // reads every active snapshot row.
       if (!link && !remote.localId && (remote.date < today || !["confirmed","payment_pending","completed"].includes(remote.status))) continue;
-      await adopt(database, remote, link);
+      await adopt(database, remote, link, preloaded, context);
     }
     // Refresh the lease between network phases. Each remote request has a
     // 25-second timeout; loss of lease stops delivery before another write.
@@ -383,15 +440,19 @@ export async function synchronizeBookly(database: D1Database) {
     // Only linked rows can be inferred deleted; unrelated past local rows are
     // never exported automatically. Initial migration is an explicit staff step.
     for (const link of links.filter(item => item.kind === "appointment" && !snapshot.appointments.some(row => row.remoteId === item.remote_id))) {
-      const current = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(link.local_id).first<Row>();
-      if (current?.source === "bookly" && current.appointment_date < snapshot.scopeFrom) continue;
-      if (current && !["cancelled","payment_expired"].includes(current.status)) {
+      const listed = preloaded.get(link.local_id);
+      if (listed?.source === "bookly" && listed.appointment_date < snapshot.scopeFrom) continue;
+      if (listed && !["cancelled","payment_expired"].includes(listed.status)) {
+        // Cancellation, refund and link update are one unit: reserve all of it.
+        if (!budget.canAfford(1 + 1 + REFUND_COST + 2)) throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run continues.");
+        const current = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(link.local_id).first<Row>();
+        if (!current || ["cancelled","payment_expired"].includes(current.status)) continue;
         if (await digest(stateOf(current)) !== link.local_digest) throw new BooklyConflict("A changed booking was deleted in Bookly.");
         await database.batch([
           database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=? AND revision=?").bind(current.id,current.revision),
           database.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").bind(current.id),
         ]);
-        await refundCancelledBooking(database,current,"bookly-sync");
+        await refundWithin(budget, raw, current);
         const terminal = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(current.id).first<Row>();
         if (terminal) await database.prepare("UPDATE bookly_links SET remote_version='deleted',local_digest=? WHERE local_id=?")
           .bind(await digest(stateOf(terminal)),current.id).run();
@@ -414,16 +475,25 @@ export async function synchronizeBookly(database: D1Database) {
     }
     await database.batch(occupancy);
     await enqueueLocal(database, null, today);
-    await drain(database, lease, budget);
+    // Remaining budget after the sweep read and the success write.
+    await drain(database, lease, cap, budget, 2);
     const refunds = (await database.prepare(`SELECT a.* FROM appointments a JOIN payment_refunds r ON r.appointment_id=a.id
       WHERE a.status='cancelled' AND a.payment_method='stripe' AND a.payment_status='paid' AND r.status='pending'`).all<Row>()).results;
-    for (const booking of refunds) await refundCancelledBooking(database,booking,"bookly-sync");
+    // Retries left over stay pending for the next run.
+    for (const booking of refunds) {
+      if (!budget.canAfford(REFUND_COST + 1)) break;
+      await refundWithin(budget, raw, booking);
+    }
     await database.prepare("UPDATE bookly_sync_state SET last_success=?,error=NULL WHERE id=1 AND lease=?")
       .bind(snapshotRequestedAt,lease).run();
   } catch (error) {
-    await database.prepare("UPDATE bookly_sync_state SET error=? WHERE id=1 AND lease=?").bind(error instanceof BooklyConflict ? "conflict":"unavailable",lease).run();
+    if (error instanceof SubrequestBudgetExhausted) {
+      await raw.prepare("UPDATE bookly_sync_state SET error='budget' WHERE id=1 AND lease=?").bind(lease).run();
+      throw new BooklyUnavailable("Calendar synchronization paused at the subrequest budget; the next run continues.");
+    }
+    await raw.prepare("UPDATE bookly_sync_state SET error=? WHERE id=1 AND lease=?").bind(error instanceof BooklyConflict ? "conflict":"unavailable",lease).run();
     throw error;
   } finally {
-    await database.prepare("UPDATE bookly_sync_state SET lease=NULL,lease_until=0 WHERE id=1 AND lease=?").bind(lease).run();
+    await raw.prepare("UPDATE bookly_sync_state SET lease=NULL,lease_until=0 WHERE id=1 AND lease=?").bind(lease).run();
   }
 }

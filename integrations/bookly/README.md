@@ -87,6 +87,20 @@ The Worker feature is OFF unless `BOOKLY_SYNC_ENABLED=true`.
   in this environment were blocked by the Chromium download network policy.
 - Verify scheduled callbacks work without customers browsing the old site.
 
+## Subrequest budget
+
+Cloudflare counts every D1 query or batch and every outbound request of one
+Worker invocation against a per-invocation subrequest limit (Workers Free: 50).
+Each background sync charges `BOOKLY_SUBREQUEST_BUDGET` (default 40, clamped to
+30–9,500) and stops at a safe boundary, never between a cancellation and its
+refund. The next minute's run resumes. An unchanged snapshot costs about 15
+subrequests regardless of its size. Each command costs up to 5, and each refund
+up to 6. With the default, a run delivers about 5 commands, so a 250-command
+activation backlog drains in about 45 minutes while occupancy stays fresh.
+Raise the budget only after confirming the Workers plan in the Cloudflare
+dashboard (for Workers Paid, 900 keeps under the 1,000 D1 queries per invocation
+that the D1 limits page documents).
+
 A complete snapshot is limited to 5,000 participants and includes seven days of
 unmapped history plus all bridge-managed appointments. Larger datasets fail
 closed. Overnight bookings and unrecognized custom statuses require review.
