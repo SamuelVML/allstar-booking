@@ -47,6 +47,11 @@ export type ObligationSummary = { refundsPending: number; notificationsSent: boo
  * refund outcome. `changeIds` limits the run to specific changes (the request
  * that created them); without it, all due obligations are processed (Cron).
  * With a budget, stops before an obligation it cannot afford. */
+/** A claim is identified by the lease expiry it set and the attempt it counts.
+ * Every later write for that claim requires both, so a worker whose lease
+ * expired can never overwrite the result of the worker that reclaimed it. */
+type Claim = { row: ObligationRow; until: number; attempts: number };
+
 export async function processBookingObligations(
   raw: D1Database,
   options: { changeIds?: string[]; budget?: SubrequestBudget; limit?: number } = {},
@@ -64,10 +69,18 @@ export async function processBookingObligations(
 
   for (const row of rows) {
     if (budget && !budget.canAfford(OBLIGATION_COST[row.kind])) break;
+    if (row.attempts >= MAX_OBLIGATION_ATTEMPTS) {
+      // Exhausted (for example a crash after its last claim): stop without
+      // another external call.
+      await database.prepare(`UPDATE booking_obligations SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'pending' AND attempts >= ? AND next_attempt_at <= ?`).bind(row.id, MAX_OBLIGATION_ATTEMPTS, now).run();
+      continue;
+    }
+    const claim: Claim = { row, until: now + LEASE_MS, attempts: row.attempts + 1 };
     const claimed = await database.prepare(`UPDATE booking_obligations SET attempts = attempts + 1, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'pending' AND next_attempt_at <= ?`).bind(now + LEASE_MS, row.id, now).run();
-    if (claimed.meta.changes !== 1) continue; // another worker holds it
-    const attempts = row.attempts + 1;
+      WHERE id = ? AND status = 'pending' AND next_attempt_at <= ? AND attempts = ? AND attempts < ?`)
+      .bind(claim.until, row.id, now, row.attempts, MAX_OBLIGATION_ATTEMPTS).run();
+    if (claimed.meta.changes !== 1) continue; // another worker holds or finished it
     try {
       const booking = await database.prepare("SELECT * FROM appointments WHERE id = ?").bind(row.appointment_id).first<ManagedBooking>();
       if (!booking) throw new Error("Appointment not found.");
@@ -75,43 +88,54 @@ export async function processBookingObligations(
         // Charged up front; runs unmetered so it never stops inside a refund.
         budget?.charge(EXTERNAL_COST.refund);
         const outcome = await refundCancelledBooking(raw, booking, "booking-obligation");
-        if (outcome === "pending") await retry(database, row, attempts, "Stripe refund not confirmed.");
-        else await complete(database, row, outcome);
+        if (outcome === "pending") await retry(database, claim, "Stripe refund not confirmed.");
+        else await complete(database, claim, outcome);
         continue;
       }
       const refund = await database.prepare("SELECT status, outcome, attempts FROM booking_obligations WHERE change_id = ? AND kind = 'refund'")
         .bind(row.change_id).first<{ status: string; outcome: string | null; attempts: number }>();
       if (refund && refund.status === "pending" && refund.attempts === 0) {
         // Wait for the first refund attempt; give the claim back unchanged.
-        await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = 0 WHERE id = ?").bind(row.id).run();
+        await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = 0 WHERE id = ? AND next_attempt_at = ? AND attempts = ?")
+          .bind(row.id, claim.until, claim.attempts).run();
         continue;
       }
-      const refundStatus: RefundOutcome = !refund ? "not_needed"
-        : refund.status === "done" ? (refund.outcome as RefundOutcome) : "pending";
+      // The stored payment is authoritative: a refund can succeed while its
+      // obligation's completion write failed.
+      const refundStatus: RefundOutcome = booking.payment_status === "refunded" ? "refunded"
+        : !refund ? "not_needed" : refund.status === "done" ? (refund.outcome as RefundOutcome) : "pending";
       budget?.charge(EXTERNAL_COST.notify);
       const sent = await sendBookingChangeNotification(booking, "cancel", row.change_id, undefined, refundStatus);
-      if (sent) await complete(database, row, "sent");
-      else await retry(database, row, attempts, "Email not delivered.");
+      if (sent) await complete(database, claim, "sent");
+      else await retry(database, claim, "Email not delivered.");
     } catch (error) {
       // The pre-checked cost includes this final write. If it fails, the claim
       // expires and the obligation is retried; external calls are idempotent.
-      try { await retry(database, row, attempts, error instanceof Error ? error.message.slice(0, 500) : "Obligation failed."); }
+      try { await retry(database, claim, error instanceof Error ? error.message.slice(0, 500) : "Obligation failed."); }
       catch { break; }
     }
   }
 }
 
-async function complete(database: D1Database, row: ObligationRow, outcome: string) {
-  await database.prepare("UPDATE booking_obligations SET status = 'done', outcome = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-    .bind(outcome, row.id).run();
+async function complete(database: D1Database, claim: Claim, outcome: string) {
+  await database.prepare(`UPDATE booking_obligations SET status = 'done', outcome = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'pending' AND next_attempt_at = ? AND attempts = ?`)
+    .bind(outcome, claim.row.id, claim.until, claim.attempts).run();
 }
 
 /** Back off, or stop after the last attempt. A failed refund stays visible in
  * Backstage as paid and cancelled, where staff can retry it. */
-async function retry(database: D1Database, row: ObligationRow, attempts: number, message: string) {
-  const failed = attempts >= MAX_OBLIGATION_ATTEMPTS;
-  await database.prepare(`UPDATE booking_obligations SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-    .bind(failed ? "failed" : "pending", failed ? 0 : Date.now() + backoffMs(attempts), message, row.id).run();
+async function retry(database: D1Database, claim: Claim, message: string) {
+  const failed = claim.attempts >= MAX_OBLIGATION_ATTEMPTS;
+  await database.prepare(`UPDATE booking_obligations SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'pending' AND next_attempt_at = ? AND attempts = ?`)
+    .bind(failed ? "failed" : "pending", failed ? 0 : Date.now() + backoffMs(claim.attempts), message, claim.row.id, claim.until, claim.attempts).run();
+}
+
+/** Whether any obligation is due now; one read. */
+export async function obligationsDue(database: D1Database) {
+  return Boolean(await database.prepare("SELECT 1 AS due FROM booking_obligations WHERE status = 'pending' AND next_attempt_at <= ? LIMIT 1")
+    .bind(Date.now()).first());
 }
 
 /** Outcome of the obligations of specific changes, for the response. */

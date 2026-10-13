@@ -42,11 +42,26 @@ const stripe = {
   } },
 };
 const delivered = new Map(); // Resend idempotency key -> delivered email
-let resendCalls = 0; let resendFailures = 0;
+let resendCalls = 0; let resendFailures = 0; let resendGate = null;
+let clockOffset = 0;
+class TestDate extends Date {
+  constructor(...args) { if (args.length === 0) super(Date.now() + clockOffset); else super(...args); }
+  static now() { return Date.now() + clockOffset; }
+}
+// Minimal Bookly double: an empty calendar that accepts every command.
+let booklyCommands = 0;
+async function booklyDouble(url) {
+  const route = new URL(url).pathname.split('/').pop();
+  if (route === 'snapshot') return Response.json({ complete: true, scopeFrom: '2000-01-01', appointments: [] });
+  if (route === 'command') { booklyCommands++; return Response.json({ remoteId: String(1000 + booklyCommands), version: 'a'.repeat(64) }); }
+  throw new Error(`Unexpected Bookly route ${route}`);
+}
 async function fetchDouble(url, options) {
   subrequests++;
+  if (String(url).startsWith('https://wp.example.test/')) return booklyDouble(url);
   if (!String(url).startsWith('https://api.resend.com/')) throw new Error(`Unexpected fetch ${url}`);
   resendCalls++;
+  if (resendGate) { const gate = resendGate; resendGate = null; await gate; }
   if (resendFailures > 0) { resendFailures--; return new Response('{}', { status: 500 }); }
   const key = options.headers['Idempotency-Key'];
   if (!delivered.has(key)) delivered.set(key, JSON.parse(options.body));
@@ -59,7 +74,7 @@ function load(relative) {
   const filename = path.resolve(root, relative); if (modules.has(filename)) return modules.get(filename).exports;
   const m = { exports: {} }; modules.set(filename, m);
   const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  vm.runInNewContext(code, { module: m, exports: m.exports, console: { ...console, error() {} }, crypto, TextEncoder, TextDecoder, URL, Request, Response, Headers, AbortSignal, Date, Error,
+  vm.runInNewContext(code, { module: m, exports: m.exports, console: { ...console, error() {} }, crypto, TextEncoder, TextDecoder, URL, Request, Response, Headers, AbortSignal, Date: TestDate, Error,
     setTimeout: fn => setImmediate(fn), fetch: fetchDouble,
     require(name) {
       if (name === 'cloudflare:workers') return { env };
@@ -111,6 +126,9 @@ function reset() {
   db.exec('PRAGMA foreign_keys=ON');
   db.exec('DROP TRIGGER IF EXISTS test_fail_obligation');
   stripeRefunds.clear(); delivered.clear(); stripeCreateCalls = 0; stripeFailures = 0; resendCalls = 0; resendFailures = 0; beforeBatch = null;
+  resendGate = null; clockOffset = 0; booklyCommands = 0;
+  Object.assign(env, { BOOKLY_SYNC_ENABLED: 'false' }); delete env.BOOKLY_BRIDGE_URL; delete env.BOOKLY_BRIDGE_SECRET;
+  db.prepare('UPDATE bookly_sync_state SET lease=NULL,lease_until=0,last_success=NULL,error=NULL WHERE id=1').run();
 }
 const results = [];
 async function check(name, fn) {
@@ -257,6 +275,9 @@ await check('a worker crash after the Stripe refund is recovered without a dupli
   assert.equal(stripeRefunds.size, 1, 'the retry reuses the recorded refund');
   assert.equal(obligationRows().find(row => row.kind === 'refund').status, 'done');
   assert.equal(emailsFor(card.reference), 1);
+  const email = [...delivered.values()].find(item => item.subject.includes(card.reference));
+  assert.match(email.text, /refunded automatically/, 'the email reports the refund Stripe completed');
+  assert.doesNotMatch(email.text, /needs attention/);
 });
 
 await check('concurrent processors claim each obligation once', async () => {
@@ -314,6 +335,63 @@ await check('the Cron task stays within the subrequest budget and resumes a larg
   }
   assert.equal(stripeRefunds.size, 20); assert.equal(delivered.size, 20);
   results.push(`  (40 obligations: ${runs.length} Cron runs, peak ${Math.max(...runs)} subrequests)`);
+});
+
+await check('an exhausted obligation left pending by a crash is marked failed without another call', async () => {
+  const date = openDay();
+  paid(date, '11:00');
+  stripeFailures = 100;
+  await vacation(date);
+  // A crash after the last claim left the row pending at the attempt limit.
+  db.prepare("UPDATE booking_obligations SET attempts=?, status='pending', next_attempt_at=0 WHERE kind='refund'").run(obligations.MAX_OBLIGATION_ATTEMPTS);
+  const calls = stripeCreateCalls;
+  await scheduled.runScheduledTasks();
+  await scheduled.runScheduledTasks();
+  const refund = obligationRows().find(row => row.kind === 'refund');
+  assert.equal(stripeCreateCalls, calls, 'no Stripe call beyond the cap');
+  assert.equal(refund.status, 'failed'); assert.equal(refund.attempts, obligations.MAX_OBLIGATION_ATTEMPTS);
+});
+
+await check('a worker whose lease expired cannot overwrite the result of the worker that reclaimed it', async () => {
+  const date = openDay();
+  const backstage = load('lib/backstage.ts');
+  const settings = await load('lib/booking-settings.ts').readBookingSettings(database);
+  const shop = localAppointment({ appointment_date: date, start_time: '13:00' });
+  await backstage.blockFullDaysCancelling(database, { fromDate: date, toDate: date, reason: 'Vacation' }, [appointment(shop.id)], 'staff-1', settings);
+  let release; resendGate = new Promise(resolve => { release = resolve; });
+  const slow = obligations.processBookingObligations(database); // claims, then stalls in Resend
+  while (resendCalls === 0) await new Promise(resolve => setImmediate(resolve));
+  clockOffset = 6 * 60_000; // the slow worker's five-minute lease expires
+  await obligations.processBookingObligations(database); // reclaims and delivers
+  assert.equal(obligationRows()[0].status, 'done');
+  resendFailures = 3; release(); // the slow worker now fails all its attempts
+  await slow;
+  const row = obligationRows()[0];
+  assert.equal(row.status, 'done', 'the late failure does not reopen the obligation');
+  assert.equal(row.outcome, 'sent');
+  clockOffset = 3 * 60 * 60_000; await scheduled.runScheduledTasks();
+  assert.equal(delivered.size, 1, 'delivered once');
+});
+
+await check('a large Bookly backlog cannot starve refund and email obligations in the Cron task', async () => {
+  Object.assign(env, { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.example.test/wp-json/allstar-bookly/v1', BOOKLY_BRIDGE_SECRET: 'x'.repeat(40) });
+  for (let index = 0; index < 200; index += 1) localAppointment({ appointment_date: day(40 + index), start_time: '10:00' });
+  const date = openDay();
+  const conflicts = [paid(date, '10:00'), paid(date, '11:00'), localAppointment({ appointment_date: date, start_time: '13:00' })];
+  const backstage = load('lib/backstage.ts');
+  const settings = await load('lib/booking-settings.ts').readBookingSettings(database);
+  await backstage.blockFullDaysCancelling(database, { fromDate: date, toDate: date, reason: 'Vacation' }, conflicts.map(row => appointment(row.id)), 'staff-1', settings);
+  const runs = [];
+  while (obligationRows().some(row => row.status === 'pending')) {
+    subrequests = 0; await scheduled.runScheduledTasks(); runs.push(subrequests);
+    assert.ok(subrequests <= budgets.DEFAULT_SUBREQUEST_BUDGET, `run used ${subrequests}`);
+    assert.ok(runs.length <= 6, `obligations progress every run (${runs.length} runs, ${obligationRows().filter(row => row.status === 'done').length} done)`);
+  }
+  const pending = db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE status='pending'").get().n;
+  assert.ok(pending > 0, 'the Bookly backlog was still draining meanwhile');
+  assert.ok(booklyCommands > 0, 'Bookly sync kept running');
+  assert.equal(stripeRefunds.size, 2); assert.equal(delivered.size, 3);
+  results.push(`  (5 obligations behind a 200-command Bookly backlog: ${runs.length} Cron runs, peak ${Math.max(...runs)} subrequests, ${pending} commands still queued)`);
 });
 
 /* ---------------------------------------------- ordinary time blocks unchanged */
