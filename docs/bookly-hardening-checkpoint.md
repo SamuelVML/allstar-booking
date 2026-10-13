@@ -372,3 +372,63 @@ the schema are unchanged.
 3. Still open from the report above: the 14 service mappings, the Plesk checks
    (clone, InnoDB, GET_LOCK, Bookly Pro), the test Worker and D1 (Cloudflare
    credentials), staging activation checks, and production backups before Phase 1.
+
+## Cloudflare plan and subrequest budget (commit `73c19d1`)
+
+### Plan verification: not possible from this environment
+
+The owner asked for the Workers plan to be verified, not inferred. It could not be:
+there are no Cloudflare credentials here (no `CLOUDFLARE_API_TOKEN`, no wrangler
+login), and the policy blocks `developers.cloudflare.com`. **The plan is unverified.**
+The owner can confirm it in either of these ways:
+
+- Dashboard: Workers & Pages → Plans (shows "Workers Free" or "Workers Paid").
+- API, with a read-only token: `curl -H "Authorization: Bearer $TOKEN"
+  https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/subscriptions` and
+  look for the Workers plan in the result.
+
+### Limits used (Cloudflare documentation as indexed by web search, 2026-10-13)
+
+| | Workers Free | Workers Paid |
+|---|---|---|
+| Subrequests per invocation (fetch + Cloudflare services, **including D1**) | 50 | 10,000 on the Workers limits page; 1,000 on the older page |
+| D1 queries per invocation (D1 limits page) | 50 | 1,000 |
+
+The sources disagree for Paid, so the binding Paid figure is the lower one: 1,000 D1
+queries. D1 queries count, so the budget covers every D1 call, not only Bookly requests.
+
+### Budget calculation
+
+Because the plan is unverified, the default budget is set for the strictest limit:
+**`BOOKLY_SUBREQUEST_BUDGET` = 40 per invocation** (clamped 30–9,500). That leaves
+10 of Free's 50 for the invoking request's own calls: the signed WordPress callback
+spends 2 before syncing, and staff authentication may spend 1. Inside the 40:
+
+| Item | Subrequests |
+|---|---|
+| Closing reserve (error state + lease release, unmetered) | 2 |
+| Fixed cost of a run: lease, drain read, links, snapshot, appointment preload, lease renewal, occupancy batch, export (4 reads), second drain read, refund sweep read, success write | ≈ 15 (measured idle run: 15, with 1,000 unchanged rows) |
+| Reserved for the snapshot while the first drain runs | 18 |
+| Per command (worst case: renewal, Bookly request, lookup, batch, error write) | 5 (success: 3) |
+| Per refund (3 D1 + Stripe session lookup + refund; charged before the cancellation it belongs to) | 6 |
+| Per new or changed snapshot row | 1 batch (+6 if it cancels a paid booking) |
+| Per new command record | 1 batch per 50 |
+
+Measured (`tests/bookly-budget.mjs`, which counts real D1, Bookly and Stripe calls):
+
+| Scenario | Budget 40 | Budget 900 |
+|---|---|---|
+| Idle run, 1,000 unchanged Bookly rows | 15 | 15 |
+| First import of 1,000 native rows | 31 runs, peak 40 (availability fail-closed until done) | 2 runs, peak 900 |
+| 250-command export backlog | 43 runs, peak 33, every run keeps occupancy fresh | 3 runs (100-command cap), peak 320 |
+| 20 pending refund retries | 5 runs, peak 35 | 1 run, peak 115 |
+| 15 paid bookings deleted in Bookly | 5 runs, peak 37, never a cancellation without its refund record | 1 run, peak 150 |
+| Pre-budget code (for comparison) | idle 2,013; backlog 563 per run | — |
+
+Recommendation once the plan is confirmed:
+- **Workers Free:** keep the default 40.
+- **Workers Paid:** set `BOOKLY_SUBREQUEST_BUDGET=900`, which keeps under the
+  1,000 D1 queries per invocation.
+
+PR #9 (vacation correction) runs its refund and email retries in the same Cron
+invocation and shares this budget: 40 obligations drained in 12 runs, peak 33.
