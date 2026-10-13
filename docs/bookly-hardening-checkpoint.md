@@ -336,3 +336,39 @@ tables and the old WordPress install. Resolve pending commands by replay, never 
   Test Worker and D1, because there are no Cloudflare credentials.
 - Blocked (owner): the 14 service mappings, the Plesk confirmations (clone,
   InnoDB, GET_LOCK, Bookly Pro), production backups and every deployment.
+
+## Review remediation (commit `d136664`, owner-authorized)
+
+The Codex review of `23231c0` raised five regressions introduced by this branch.
+The owner authorized fixing them, and all five are fixed in one commit, with
+regression tests in `tests/bookly-review-fixes.mjs` (13 checks, now part of
+`npm test`). Before the fix, 12 of the 13 checks fail on the old code. The
+100-command boundary passes either way, as expected. After the fix, all 13 pass.
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | More than 100 queued Bookly commands made every sync throw, so occupancy went stale and online booking closed | Each background run delivers at most 100 commands (`DRAIN_BATCH`, counted across both drain phases). The rest drain on later runs. Delivered commands are marked done as they go, so progress survives interruption. Previously attempted commands replay first. Request-path pushes select their own commands (`json_each`), so a backlog no longer hides a new booking from Bookly arbitration |
+| 2 | `retry_refund` was blocked while Bookly occupancy was stale | `assertBooklyFresh` runs only for `block`, `block_range` and `walk_in` |
+| 3 | A failed later vacation cancellation stranded earlier refunds and emails | Each booking is refunded and notified as its cancellation commits (the `194dea2` order). Stripe and Resend idempotency keys prevent duplicates |
+| 4 | A refunded late Stripe payment showed the booking confirmation | `/api/stripe/session` returns 409 `outcome: "cancelled"` with `refunded` for cancelled or expired bookings, and 409 "still processing" for any other unconfirmed state. The success page uses `lib/payment-outcome.ts` and shows a cancelled/refunded notice |
+| 5 | A walk-in rejected by Bookly reported `saved: true` | Returns success only after Bookly accepts it. A Bookly conflict returns 409 (walk-in released), Bookly unreachable returns 503 (reserved, background replay) |
+
+Validation on `d136664`: `npm test` exit 0 (34 PASS lines), `npx tsc --noEmit`
+exit 0, `npm run lint` 0 errors / 3 existing warnings, `npm run build` exit 0,
+`php tests/bookly-plugin.php` PASS. HMAC authentication, the sync lease and
+the schema are unchanged.
+
+### Release blockers after remediation
+
+1. **Vacation over booked slots (pre-existing since `194dea2`, owner decision).**
+   Trigger `time_off_respects_appointment` (migration 0004) refuses time off over
+   any booked slot. `block_range` with `cancelConflicts` therefore returns 409
+   before cancelling anything whenever a conflicting booking sits inside opening
+   hours (`tests/booking-management.mjs` asserts this). The cancellation loop only
+   runs for bookings outside the current opening hours.
+2. **Cloudflare plan.** One sync run makes up to about 102 Bookly subrequests (1
+   snapshot plus up to 100 commands). That is within the paid plan (1,000) but
+   over the free plan (50). Confirm the plan, or lower `DRAIN_BATCH`.
+3. Still open from the report above: the 14 service mappings, the Plesk checks
+   (clone, InnoDB, GET_LOCK, Bookly Pro), the test Worker and D1 (Cloudflare
+   credentials), staging activation checks, and production backups before Phase 1.
