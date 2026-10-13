@@ -1,0 +1,17 @@
+== pr8-audit-independent
+{"name":"F1 Bookly cancellation refund not retried","first":{"ok":true,"commands":0},"later":[{"ok":true,"commands":0},{"ok":true,"commands":0},{"ok":true,"commands":0}],"appointment":{"id":"74b271b7-74c8-42c7-899a-8bd5f16dad34","reference":"AS-R1","service_id":"haircut","service_name":"Haircut","duration_minutes":30,"price_cent
+{"name":"F1 late refund retries","lateOut":[{"outcome":"cancelled","refunded":false,"error":"This booking was cancelled before your payment completed, so no time is reserved. Your refund is being processed; contact All Star if it does not arrive."},{"outcome":"cancelled","refunded":false,"error":"This booking was cancelled befor
+{"name":"F2 committed move rejected remotely","calendar":"conflict","localTime":"10:00","localStatus":"confirmed","bookly":[{"localId":"16b34255-509c-49cf-9982-f2a529a43023","time":"10:00","status":"confirmed"},{"localId":null,"time":"11:00","status":"confirmed"}]}
+{"name":"F3 poison command stalls whole sync","stalls":[{"ok":true,"commands":1},{"ok":true,"commands":0},{"ok":true,"commands":0}],"snapshotsTaken":3,"healthyLinked":true,"pending":0}
+{"name":"F4 deletion race releases live appointment slots","racedSync":{"ok":true,"commands":0},"localStatus":"confirmed","revision":1,"slots":8}
+{"name":"F4 double booking after deletion race","afterRace":"no second sync before booking","newBookingStatus":409,"confirmed":[{"reference":"AS-R5","start_time":"10:00"}]}
+{"name":"F7 interrupted push before checkout cannot resume","initial":{"status":503,"body":{"error":"The calendar connection was interrupted. Your request is retained; retry this same form before starting another booking."}},"retry":{"status":503,"body":{"error":"We could not save your booking. Please try again."}},"local":{"sta
+{"name":"F8 lost lease still cancels and refunds","expired":{"ok":false,"commands":0,"error":"Calendar sync lease expired."},"lease":"replacement-owner","status":"confirmed","payment":"paid","refunds":0}
+{"name":"F9 vacation normal hours","vacationResult":{"status":200,"body":{"saved":true,"calendar":"disabled","blockedDays":1,"cancelledBookings":1,"refundsPending":0,"notificationsSent":false}},"status":"cancelled","timeOff":1}
+{"name":"F2 route confirms rejected move and notifies","status":409,"body":{"error":"That time was just booked in Bookly. The booking stays at its original time and the customer was not notified.","changed":false,"restored":true,"calendar":"conflict","revision":2},"notifications":0,"localTime":"10:00"}
+== repo-audit-obligations
+{"name":"F5 initial notification delivered but completion write failed","response":{"status":200,"body":{"saved":true,"calendar":"disabled","blockedDays":1,"cancelledBookings":1,"refundsPending":1,"notificationsSent":false}},"rows":[{"kind":"notify","status":"pending","attempts":1},{"kind":"refund","status":"pending","attempts":
+{"name":"F5 same key changed refund payload","rows":[{"kind":"notify","status":"done","attempts":2,"error":null},{"kind":"refund","status":"done","attempts":2,"error":null}],"payment":"refunded","delivered":1}
+{"name":"F5 exhausted retry","rows":[{"kind":"notify","status":"done","attempts":2,"error":null},{"kind":"refund","status":"done","attempts":2,"error":null}],"resendCalls":2,"delivered":1}
+== repo-audit-idempotency-window
+{"name":"F6 retry after 24h sends duplicate","firstDeliveredCalls":1,"totalDeliveredCalls":1,"row":[{"status":"reconcile","attempts":2}]}

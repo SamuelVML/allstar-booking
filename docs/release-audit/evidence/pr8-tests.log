@@ -1,0 +1,95 @@
+
+> site-creator-vinext-starter@0.1.0 test
+> npm run test:booking-management && node tests/native-api.mjs && npm run test:backstage && node tests/booking-email-retry.mjs && npm run test:backstage-render && npm run test:bookly
+
+
+> site-creator-vinext-starter@0.1.0 test:booking-management
+> node tests/booking-management.mjs
+
+PASS: signed staff tokens, spoofed headers, issuer/audience/expiry/allowlist, CSRF and protected routes
+Automatic Stripe refund failed retryable Error: Temporary Stripe failure
+    at Object.create (file:///private/tmp/allstar-release-audit/pr8/tests/booking-management.mjs:29:19)
+    at refundCancelledBooking (/private/tmp/allstar-release-audit/pr8/lib/refunds.ts:37:45)
+    at async Object.POST (/private/tmp/allstar-release-audit/pr8/app/api/admin/bookings/change/route.ts:46:15)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/booking-management.mjs:167:30
+PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety
+PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations
+PASS: editable settings persist with revision checks and full-day time off uses configured hours
+PASS: real-time cutoffs, compact-gap ranking and distinct-day customer recommendations
+PASS: native API rejects missing/wrong audience/outsider tokens before DB access; date filtering, literal search, customer history, ranked Backstage recommendations, no-store and minimal fields
+
+> site-creator-vinext-starter@0.1.0 test:backstage
+> node tests/backstage.mjs
+
+PASS: payment state, day model, walk-in slots, next up and revenue semantics
+PASS: customers get two unexplained times, Backstage explanations stay behind staff auth
+PASS: booking email retries transient failures without duplicating sends
+
+> site-creator-vinext-starter@0.1.0 test:backstage-render
+> node tests/backstage-render.mjs
+
+PASS: all five Backstage screens render, Samaritan asks the protected endpoint on the 30s cadence, and every page refuses unauthenticated visitors
+PASS: homepage booking CTA and service rows render native booking links
+
+> site-creator-vinext-starter@0.1.0 test:bookly
+> node tests/bookly.mjs && node tests/bookly-hardening.mjs && node tests/bookly-review-fixes.mjs && node tests/bookly-budget.mjs && node tests/stripe-test-mode.mjs
+
+PASS: opt-in, signed requests, native import, external payment ownership, conservative slots and live schedule filtering
+PASS: persistent replay after lost response, no duplicates, Bookly reschedule, Stripe cancellation refund once
+PASS: incomplete snapshots fail closed, native updates, competing-edit hold and synchronization lease
+PASS: unsigned scheduler callback rejected before synchronization
+PASS: activation skips historical, cancelled, expired and completed rows; preserves future bookings and occupancy; imports only current native rows; idempotent
+Scheduled Bookly sync failed Calendar synchronization is in progress. Try again shortly.
+PASS: availability and bookings use live day checks and single-command pushes; no request path takes a snapshot; lease overlap is harmless
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:47:15)
+    at async Object.GET (/private/tmp/allstar-release-audit/pr8/app/api/availability/route.ts:37:9)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/bookly-hardening.mjs:207:15
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:47:15)
+    at async Object.GET (/private/tmp/allstar-release-audit/pr8/app/api/availability/route.ts:37:9)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/bookly-hardening.mjs:208:15
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:47:15)
+    at async Object.GET (/private/tmp/allstar-release-audit/pr8/app/api/availability/route.ts:37:9)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/bookly-hardening.mjs:215:15
+Scheduled Bookly sync failed Bookly could not be reached. Refresh before retrying.
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:47:15)
+    at async Object.GET (/private/tmp/allstar-release-audit/pr8/app/api/availability/route.ts:37:9)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/bookly-hardening.mjs:221:15
+Availability lookup failed BooklyUnavailable [Error]: Bookly could not be reached. Refresh before retrying.
+    at booklyRequest (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:94:15)
+    at async filterBooklyTimes (/private/tmp/allstar-release-audit/pr8/lib/bookly.ts:114:16)
+    at async Object.GET (/private/tmp/allstar-release-audit/pr8/app/api/availability/route.ts:77:26)
+    at async file:///private/tmp/allstar-release-audit/pr8/tests/bookly-hardening.mjs:225:15
+PASS: 180-second occupancy bound; stale, missing or unreachable Bookly closes availability, recommendations and bookings without reserving
+PASS: concurrent same-slot requests yield one booking; post-snapshot Bookly bookings are rejected by the live check or Bookly arbitration; request-time links survive a concurrent snapshot
+PASS backlog of 100 drains in bounded runs
+PASS backlog of 101 drains in bounded runs
+PASS backlog of 250 drains in bounded runs
+PASS backlog of 250 recovers after a lost response and an outage
+PASS request-path push reaches its own command behind a large backlog
+PASS retry_refund and shop payments work while Bookly occupancy is stale
+PASS repeated refund retries never refund twice
+PASS a failed vacation cancellation does not strand earlier refunds or emails
+PASS a failed refund during vacation cancellation stays durably retryable
+PASS a payment completed after the hold expired never shows a confirmation
+PASS a late payment whose refund failed reports the pending refund, not a booking
+PASS a walk-in taken in Bookly after the live check is reported as failed
+PASS a walk-in Bookly has not confirmed is not reported as added
+PASS: bounded resumable backlog (100/101/250, interruption, lost response), refund retries during outages, partial vacation cancellation, refunded late payments, walk-ins rejected by Bookly
+PASS budget configuration: default fits Workers Free, values are clamped
+PASS default budget 40: idle run with 1,000 unchanged Bookly rows stays within budget (import runs=31, peak=40, idle run=15)
+PASS default budget 40: backlog of 250 drains in bounded runs with occupancy kept fresh (runs=43, peak=33)
+PASS default budget 40: backlog survives a lost response and an outage
+PASS default budget 40: refund retries resume across runs, each refund exactly once (runs=5, peak=35)
+PASS default budget 40: bookings deleted in Bookly are cancelled and refunded as one unit (runs=5, peak=37)
+PASS budget 900: idle run with 1,000 unchanged Bookly rows stays within budget (import runs=2, peak=900, idle run=15)
+PASS budget 900: backlog of 250 drains in bounded runs with occupancy kept fresh (runs=3, peak=320)
+PASS budget 900: backlog survives a lost response and an outage
+PASS budget 900: refund retries resume across runs, each refund exactly once (runs=1, peak=115)
+PASS budget 900: bookings deleted in Bookly are cancelled and refunded as one unit (runs=1, peak=150)
+PASS an exhausted budget records its state and releases the lease
+PASS: Bookly sync stays within the per-invocation subrequest budget (default 40 and 900) across idle runs, 250-command backlogs, lost responses, outages, refund retries and Bookly deletions
+PASS: STRIPE_REQUIRE_TEST_MODE refuses live and restricted-live keys; production unchanged when unset
