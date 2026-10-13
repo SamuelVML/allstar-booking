@@ -153,6 +153,9 @@ export const paymentRefunds = sqliteTable(
     requestedBy: text("requested_by").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Automatic retry bookkeeping (lib/refunds.ts). See 0010_release_audit_remediation.sql.
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at").notNull().default(0),
   },
   (table) => [
     uniqueIndex("payment_refunds_appointment_id_unique").on(table.appointmentId),
@@ -183,6 +186,12 @@ export const booklyCallbackNonces = sqliteTable("bookly_callback_nonces", {
 export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
   id: text("id").primaryKey(), valid: integer("valid").notNull(),
 }, table => [check("bookly_revision_guards_valid", sql`${table.valid} = 1`)]);
+// Records held for staff reconciliation instead of blocking unrelated sync
+// work (lib/bookly.ts). See 0010_release_audit_remediation.sql.
+export const booklyConflicts = sqliteTable("bookly_conflicts", {
+  localId: text("local_id").primaryKey(), remoteId: text("remote_id"), remoteVersion: text("remote_version"),
+  reason: text("reason").notNull(), detectedAt: text("detected_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
 
 // Durable side effects of a committed booking change (refund, customer email).
 // Written in the same transaction as the change; processed afterwards by
@@ -192,16 +201,21 @@ export const bookingObligations = sqliteTable("booking_obligations", {
   appointmentId: text("appointment_id").notNull().references(() => appointments.id),
   changeId: text("change_id").notNull().references(() => bookingChanges.id),
   kind: text("kind", { enum: ["refund", "notify"] }).notNull(),
-  status: text("status", { enum: ["pending", "done", "failed"] }).notNull().default("pending"),
+  status: text("status", { enum: ["pending", "done", "failed", "reconcile"] }).notNull().default("pending"),
   attempts: integer("attempts").notNull().default(0),
   nextAttemptAt: integer("next_attempt_at").notNull().default(0),
   outcome: text("outcome"),
   lastError: text("last_error"),
+  // The exact provider request, stored before its first delivery and reused
+  // verbatim by every retry, and when that first delivery started. See
+  // 0010_release_audit_remediation.sql.
+  payload: text("payload"),
+  firstAttemptAt: integer("first_attempt_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, table => [
   uniqueIndex("booking_obligations_change_kind").on(table.changeId, table.kind),
   index("booking_obligations_due").on(table.status, table.nextAttemptAt),
   check("booking_obligations_kind", sql`${table.kind} IN ('refund','notify')`),
-  check("booking_obligations_status", sql`${table.status} IN ('pending','done','failed')`),
+  check("booking_obligations_status", sql`${table.status} IN ('pending','done','failed','reconcile')`),
 ]);
