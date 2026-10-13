@@ -64,6 +64,13 @@
       "when": 1791842751560,
       "tag": "0008_bookly_bridge",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791900585712,
+      "tag": "0009_booking_obligations",
+      "breakpoints": true
     }
   ]
 }

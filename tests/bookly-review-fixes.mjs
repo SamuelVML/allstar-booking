@@ -15,11 +15,11 @@ const require = createRequire(import.meta.url);
 const root = process.cwd();
 const db = new DatabaseSync(':memory:');
 for (const name of fs.readdirSync('drizzle').filter(name => name.endsWith('.sql')).sort()) db.exec(fs.readFileSync(`drizzle/${name}`, 'utf8'));
-let afterBatch = null;
+let afterBatch = null; let beforeBatch = null;
 const database = {
   prepare(sql) { let values=[]; return { bind(...v){values=v;return this;}, async first(){return db.prepare(sql).get(...values)??null;},
     async all(){return {results:db.prepare(sql).all(...values)};},async run(){return {meta:{changes:Number(db.prepare(sql).run(...values).changes)}};}};},
-  async batch(statements){db.exec('BEGIN');let result=[];try{for(const s of statements)result.push(await s.run());db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
+  async batch(statements){if (beforeBatch) { const hook = beforeBatch; beforeBatch = null; await hook(); } db.exec('BEGIN');let result=[];try{for(const s of statements)result.push(await s.run());db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
     if (afterBatch) await afterBatch(); return result;},
 };
 
@@ -140,7 +140,7 @@ function reset() {
   db.exec('PRAGMA foreign_keys=OFF'); for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('bookly_sync_state','booking_settings') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__drizzle%'").all()) db.exec(`DELETE FROM ${name}`); db.exec('PRAGMA foreign_keys=ON');
   db.prepare('UPDATE bookly_sync_state SET lease=NULL,lease_until=0,last_success=NULL,error=NULL WHERE id=1').run();
   remote.clear(); receipts.clear(); emails.length = 0; stripeRefunds.clear(); stripeFailures = 0;
-  bridgeDown = false; commandsDown = false; downAtCommand = null; beforeCommand = null; loseResponse = null; afterBatch = null;
+  bridgeDown = false; commandsDown = false; downAtCommand = null; beforeCommand = null; loseResponse = null; afterBatch = null; beforeBatch = null;
 }
 async function syncRun() {
   const before = calls.command;
@@ -253,28 +253,32 @@ await check('repeated refund retries never refund twice', async () => {
 // The time-off trigger (0004) refuses a vacation over booked slots, so the
 // cancellation loop runs for bookings outside the current opening hours (for
 // example after the hours were edited). Those start at 08:00 here.
-await check('a failed vacation cancellation does not strand earlier refunds or emails', async () => {
+await check('a concurrent edit during a vacation cancels, refunds and emails nothing; a retry does each once', async () => {
+  // Cancellations, slot release, obligations and the vacation commit in one
+  // transaction (fix/vacation-over-bookings), so a booking edited while the
+  // vacation is saved rolls the whole operation back instead of leaving a
+  // partial set of cancellations.
   markFresh();
   const date = day(9);
   const first = localAppointment({ appointment_date: date, start_time: '08:00', payment_method: 'stripe', payment_status: 'paid', stripe_checkout_session_id: 'cs_test_v1' });
   checkoutSessions.set('cs_test_v1', { id: 'cs_test_v1', payment_status: 'paid', payment_intent: 'pi_v1', metadata: { appointment_id: first.id } });
   const second = localAppointment({ appointment_date: date, start_time: '08:45' });
-  // A concurrent edit changes the second booking right after the first cancellation commits.
-  afterBatch = async () => {
-    if (appointment(first.id).status === 'cancelled' && appointment(second.id).revision === 0) {
-      afterBatch = null; db.prepare('UPDATE appointments SET revision=revision+1 WHERE id=?').run(second.id);
-    }
-  };
+  beforeBatch = async () => { db.prepare('UPDATE appointments SET revision=revision+1 WHERE id=?').run(second.id); };
   const response = await post({ action: 'block_range', id: crypto.randomUUID(), fromDate: date, toDate: date, reason: 'Vacation', cancelConflicts: true });
-  assert.notEqual(response.status, 200, 'the stale booking makes the request fail');
-  assert.equal(appointment(first.id).status, 'cancelled');
-  assert.equal(appointment(first.id).payment_status, 'refunded', 'the committed cancellation was refunded');
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.equal(appointment(first.id).status, 'confirmed', 'nothing was cancelled');
+  assert.equal(appointment(first.id).payment_status, 'paid');
+  assert.equal(stripeRefunds.size, 0, 'nothing was refunded');
+  assert.equal(emails.length, 0, 'nobody was emailed');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM time_off WHERE date=?').get(date).n, 0, 'the vacation was not blocked');
+  const retried = await post({ action: 'block_range', id: crypto.randomUUID(), fromDate: date, toDate: date, reason: 'Vacation', cancelConflicts: true });
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.equal(appointment(first.id).payment_status, 'refunded');
+  assert.equal(appointment(second.id).status, 'cancelled');
   assert.equal(stripeRefunds.size, 1);
-  assert.deepEqual(emails.map(email => email.reference), [first.reference], 'the committed cancellation was emailed once');
-  assert.equal(appointment(second.id).status, 'confirmed', 'the stale booking is untouched');
-  // Staff retry the refund: no duplicate refund.
+  assert.deepEqual(emails.map(email => email.reference).sort(), [first.reference, second.reference].sort(), 'each customer emailed once');
   const retry = await post({ action: 'retry_refund', id: crypto.randomUUID(), reference: first.reference, revision: appointment(first.id).revision });
-  assert.equal(retry.status, 409);
+  assert.equal(retry.status, 409, 'no pending refund remains');
   assert.equal(stripeRefunds.size, 1);
 });
 await check('a failed refund during vacation cancellation stays durably retryable', async () => {
