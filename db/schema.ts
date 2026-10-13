@@ -183,3 +183,25 @@ export const booklyCallbackNonces = sqliteTable("bookly_callback_nonces", {
 export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
   id: text("id").primaryKey(), valid: integer("valid").notNull(),
 }, table => [check("bookly_revision_guards_valid", sql`${table.valid} = 1`)]);
+
+// Durable side effects of a committed booking change (refund, customer email).
+// Written in the same transaction as the change; processed afterwards by
+// lib/booking-obligations.ts. See 0009_booking_obligations.sql.
+export const bookingObligations = sqliteTable("booking_obligations", {
+  id: text("id").primaryKey(),
+  appointmentId: text("appointment_id").notNull().references(() => appointments.id),
+  changeId: text("change_id").notNull().references(() => bookingChanges.id),
+  kind: text("kind", { enum: ["refund", "notify"] }).notNull(),
+  status: text("status", { enum: ["pending", "done", "failed"] }).notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: integer("next_attempt_at").notNull().default(0),
+  outcome: text("outcome"),
+  lastError: text("last_error"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, table => [
+  uniqueIndex("booking_obligations_change_kind").on(table.changeId, table.kind),
+  index("booking_obligations_due").on(table.status, table.nextAttemptAt),
+  check("booking_obligations_kind", sql`${table.kind} IN ('refund','notify')`),
+  check("booking_obligations_status", sql`${table.status} IN ('pending','done','failed')`),
+]);
