@@ -1,4 +1,4 @@
-import { assertBooklyFresh, pushAfterCommit } from "@/lib/bookly";
+import { assertBooklyFresh, BooklyConflict, BooklyUnavailable, booklyEnabled, pushAfterCommit, pushBooklyChanges } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -41,9 +41,12 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Check the form fields and try again." }, { status: 400 });
   try {
     const database = getD1();
-    await assertBooklyFresh(database);
-    const stored = await readBookingSettings(database);
     const input = parsed.data;
+    // Only operations that read calendar availability need fresh Bookly
+    // occupancy. Unblocking, shop payments and refund retries stay available
+    // during a Bookly outage; their calendar updates replay in the background.
+    if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await assertBooklyFresh(database);
+    const stored = await readBookingSettings(database);
     if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
     if (input.action === "block") await blockTime(database, input, user.id, stored);
     if (input.action === "block_range") {
@@ -88,14 +91,14 @@ export async function POST(request: Request) {
       // fails without changing a customer booking.
       const blockedDays = await blockFullDays(database, input, user.id, stored);
 
-      const cancelled: { booking: ManagedBooking; changeId: string }[] = [];
-      for (const booking of conflicts) {
-        const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
-        cancelled.push({ booking, changeId: change.changeId });
-      }
+      // Refund and notify each booking as soon as its cancellation commits. If a
+      // later cancellation fails, every committed one already has its refund
+      // (recorded in payment_refunds, retryable from Backstage) and its email.
+      // Stripe and Resend idempotency keys prevent duplicates on retry.
       let refundsPending = 0;
       let notificationsSent = true;
-      for (const { booking, changeId } of cancelled) {
+      for (const booking of conflicts) {
+        const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
         const refundStatus = await refundCancelledBooking(database, booking, user.id);
         if (refundStatus === "pending") refundsPending += 1;
         if (booking.customer_email) {
@@ -103,7 +106,7 @@ export async function POST(request: Request) {
             (await sendBookingChangeNotification(
               booking,
               "cancel",
-              changeId,
+              change.changeId,
               undefined,
               refundStatus,
             )) && notificationsSent;
@@ -120,7 +123,20 @@ export async function POST(request: Request) {
       });
     }
     if (input.action === "unblock") await removeBlock(database, input.id, user.id);
-    if (input.action === "walk_in") await createWalkIn(database, input, user.id, stored);
+    if (input.action === "walk_in") {
+      await createWalkIn(database, input, user.id, stored);
+      // Success only once Bookly has accepted the walk-in. A Bookly booking that
+      // took the slot after the live check makes the bridge release the walk-in.
+      try { await pushBooklyChanges(database, [input.id]); }
+      catch (error) {
+        if (error instanceof BooklyConflict) throw new BookingConflict("That time was just booked in Bookly. The walk-in was not added.");
+        if (error instanceof BooklyUnavailable) {
+          return Response.json({ error: "Bookly has not confirmed this walk-in yet. The time stays reserved and syncs automatically; refresh before adding it again." }, { status: 503 });
+        }
+        throw error;
+      }
+      return Response.json({ saved: true, calendar: booklyEnabled() ? "synced" : "disabled" });
+    }
     if (input.action === "payment") await recordPayment(database, input, user.id);
     if (input.action === "retry_refund") {
       const booking = await database

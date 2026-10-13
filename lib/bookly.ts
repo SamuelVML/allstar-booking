@@ -194,11 +194,24 @@ async function sendCommand(database: D1Database, row: CommandRow) {
   }
 }
 
-async function drain(database: D1Database, lease: string) {
-  const rows = (await database.prepare("SELECT * FROM bookly_commands WHERE status = 'pending' ORDER BY (json_extract(payload,'$.kind') = 'block'), created_at, id LIMIT 101")
-    .all<CommandRow>()).results;
-  if (rows.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Run the staff sync before accepting more bookings.");
+/** Commands delivered per background run, across both drain phases. A larger
+ * backlog (initial export, long outage) drains over successive runs: delivered
+ * commands are marked done as they succeed, so an interrupted run never repeats
+ * or loses progress.
+ */
+const DRAIN_BATCH = 100;
+type DrainBudget = { remaining: number };
+// Commands already attempted (error set) replay first: their write may have
+// reached Bookly, and the snapshot cannot be matched until they are linked.
+// Fresh commands keep appointments before time off, oldest first.
+const PENDING_ORDER = "ORDER BY (error IS NULL), (json_extract(payload,'$.kind') = 'block'), created_at, id";
+
+async function drain(database: D1Database, lease: string, budget: DrainBudget) {
+  if (budget.remaining <= 0) return;
+  const rows = (await database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' ${PENDING_ORDER} LIMIT ?`)
+    .bind(budget.remaining).all<CommandRow>()).results;
   for (const row of rows) {
+    budget.remaining -= 1;
     const renewed = await database.prepare("UPDATE bookly_sync_state SET lease_until=? WHERE id=1 AND lease=? AND lease_until > ?")
       .bind(Date.now()+120_000,lease,Date.now()).run();
     if (renewed.meta.changes !== 1) throw new BooklyUnavailable("Calendar sync lease expired.");
@@ -220,10 +233,13 @@ export async function pushBooklyChanges(database: D1Database, localIds: string[]
   // so deliver, then enqueue again until the stored state is current.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await enqueueLocal(database, localIds, today);
-    const pending = (await database.prepare("SELECT * FROM bookly_commands WHERE status = 'pending' ORDER BY (json_extract(payload,'$.kind') = 'block'), created_at, id LIMIT 101")
-      .all<CommandRow>()).results.filter(row => !localIds || localIds.includes(row.local_id));
+    // Select the requested records directly: filtering a limited queue would
+    // skip them silently behind an unrelated backlog.
+    const pending = (await (localIds
+      ? database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' AND local_id IN (SELECT value FROM json_each(?)) ${PENDING_ORDER}`).bind(JSON.stringify(localIds))
+      : database.prepare(`SELECT * FROM bookly_commands WHERE status = 'pending' ${PENDING_ORDER} LIMIT 101`)).all<CommandRow>()).results;
     if (!pending.length) return;
-    if (pending.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Run the staff sync before accepting more bookings.");
+    if (pending.length > 100) throw new BooklyUnavailable("Bookly has a large backlog. Background synchronization delivers it in batches.");
     for (const row of pending) await sendCommand(database, row);
   }
 }
@@ -332,9 +348,10 @@ export async function synchronizeBookly(database: D1Database) {
   if (acquired.meta.changes !== 1) throw new BooklyUnavailable("Calendar synchronization is in progress. Try again shortly.");
   try {
     const today = getTodayInEindhoven();
+    const budget: DrainBudget = { remaining: DRAIN_BATCH };
     // Replay uncertain writes before comparing snapshots, using the exact stored
     // payload and command ID, so a lost HTTP response never creates a duplicate.
-    await drain(database, lease);
+    await drain(database, lease, budget);
     // Read links before requesting the snapshot. Request paths can link new
     // bookings concurrently; only links that existed before the snapshot was
     // requested may be inferred deleted when the snapshot lacks them.
@@ -397,7 +414,7 @@ export async function synchronizeBookly(database: D1Database) {
     }
     await database.batch(occupancy);
     await enqueueLocal(database, null, today);
-    await drain(database, lease);
+    await drain(database, lease, budget);
     const refunds = (await database.prepare(`SELECT a.* FROM appointments a JOIN payment_refunds r ON r.appointment_id=a.id
       WHERE a.status='cancelled' AND a.payment_method='stripe' AND a.payment_status='paid' AND r.status='pending'`).all<Row>()).results;
     for (const booking of refunds) await refundCancelledBooking(database,booking,"bookly-sync");

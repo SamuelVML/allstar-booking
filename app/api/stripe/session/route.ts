@@ -10,6 +10,7 @@ type AppointmentRow = {
   end_time: string;
   price_cents: number;
   payment_status: string;
+  status: string;
 };
 
 export async function GET(request: Request) {
@@ -34,12 +35,31 @@ export async function GET(request: Request) {
     const row = await database
       .prepare(
         `SELECT reference, service_name, appointment_date, start_time, end_time,
-          price_cents, payment_status
+          price_cents, payment_status, status
          FROM appointments WHERE id = ? AND stripe_checkout_session_id = ?`,
       )
       .bind(appointmentId, session.id)
       .first<AppointmentRow>();
     if (!row) return Response.json({ error: "Booking not found." }, { status: 404 });
+    // Paid after the hold expired or the booking was cancelled: the appointment
+    // stays cancelled and the payment is refunded, so never confirm it. Every
+    // redirect or refresh re-reads the stored status.
+    if (row.status === "cancelled" || row.status === "payment_expired") {
+      const refunded = row.payment_status === "refunded";
+      return Response.json(
+        {
+          outcome: "cancelled",
+          refunded,
+          error: refunded
+            ? "This booking was cancelled before your payment completed, so no time is reserved. Your payment has been refunded."
+            : "This booking was cancelled before your payment completed, so no time is reserved. Your refund is being processed; contact All Star if it does not arrive.",
+        },
+        { status: 409 },
+      );
+    }
+    if (row.status !== "confirmed" && row.status !== "completed") {
+      return Response.json({ error: "Payment confirmation is still processing." }, { status: 409 });
+    }
 
     return Response.json({
       booking: {
