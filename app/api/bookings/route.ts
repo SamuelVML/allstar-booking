@@ -1,3 +1,4 @@
+import { assertBooklyFresh, pushBooklyChanges, filterBooklyTimes, booklyEnabled, BooklyConflict, BooklyUnavailable } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   addMinutes,
@@ -13,6 +14,7 @@ import { sendBookingConfirmation } from "@/lib/booking-email";
 import { readBookingSettings } from "@/lib/booking-settings";
 
 type BookingPayload = {
+  requestId?: string;
   serviceId?: string;
   date?: string;
   time?: string;
@@ -28,6 +30,7 @@ type BookingPayload = {
 };
 
 export async function POST(request: Request) {
+  let reserved = false;
   try {
     const payload = (await request.json()) as BookingPayload;
     const service = getService(payload.serviceId ?? "");
@@ -67,6 +70,44 @@ export async function POST(request: Request) {
     }
 
     const database = getD1();
+    const requestId = payload.requestId ?? null;
+    if (booklyEnabled() && (!requestId || !/^[a-f0-9-]{36}$/.test(requestId))) {
+      return Response.json({ error: "Refresh the booking page before continuing." }, { status: 400 });
+    }
+    // Imported Bookly occupancy must be current; the live check below and the
+    // pushed command then close the remaining window.
+    await assertBooklyFresh(database);
+    if (requestId) {
+      const previous = await database.prepare("SELECT * FROM appointments WHERE booking_request_id = ?").bind(requestId)
+        .first<{ id: string; reference: string; service_id: string; customer_email: string; customer_name: string; payment_method: string; payment_status: string; customer_account_id: string | null; appointment_date: string; start_time: string; service_name: string; end_time: string; duration_minutes: number; price_cents: number; status: string; stripe_checkout_session_id: string | null }>();
+      if (previous) {
+        reserved = true;
+        // Deliver a command left pending by an interrupted attempt. A Bookly
+        // rejection cancels the unpaid hold and surfaces as BooklyConflict.
+        await pushBooklyChanges(database, [previous.id]);
+        if (previous.service_id !== service.id || previous.customer_email !== email || previous.appointment_date !== date || previous.start_time !== time) {
+          return Response.json({ error: "This booking request was already used. Refresh before starting a different booking." }, { status: 409 });
+        }
+        if (previous.status === "payment_pending" && previous.stripe_checkout_session_id) {
+          const session = await getStripeClient().checkout.sessions.retrieve(previous.stripe_checkout_session_id);
+          if (session.url) return Response.json({ checkoutUrl: session.url });
+        }
+        if (previous.status !== "confirmed") return Response.json({ error: "This request is saved but still needs staff review. Do not create a second booking." }, { status: 409 });
+        const { settings: retrySettings } = await readBookingSettings(database);
+        let confirmationEmailSent = false;
+        try { confirmationEmailSent = await sendBookingConfirmation({
+          appointmentId: previous.id, reference: previous.reference, customerName: previous.customer_name, customerEmail: previous.customer_email,
+          serviceName: previous.service_name, date: previous.appointment_date, time: previous.start_time, endTime: previous.end_time,
+          priceCents: previous.price_cents, paymentMethod: previous.payment_status === "paid" ? "Paid online" : "Pay at the shop", loyaltyRewardPoints: retrySettings.loyaltyRewardPoints,
+        }); } catch { /* Same provider idempotency key makes retries safe. */ }
+        const retryCustomer = previous.customer_account_id ? await database.prepare("SELECT loyalty_points FROM customer_accounts WHERE id=?").bind(previous.customer_account_id).first<{ loyalty_points: number }>() : null;
+        return Response.json({ confirmationEmailSent, booking: {
+          reference: previous.reference, serviceName: previous.service_name, date: previous.appointment_date, time: previous.start_time,
+          endTime: previous.end_time, durationMinutes: previous.duration_minutes, priceCents: previous.price_cents,
+          paymentMethod: previous.payment_status === "paid" ? "Paid online" : "Pay at the shop", loyalty: { currentPoints: retryCustomer?.loyalty_points ?? 0, rewardAt: retrySettings.loyaltyRewardPoints, pendingPoint: 1 },
+        } });
+      }
+    }
     const { settings } = await readBookingSettings(database);
     const maximumDate = new Date(`${today}T12:00:00Z`);
     maximumDate.setUTCDate(maximumDate.getUTCDate() + settings.bookingWindowDays);
@@ -83,7 +124,7 @@ export async function POST(request: Request) {
     const serviceName = `${service.name}${colourAddOn ? " + colour" : ""}`;
     const occupiedRows = await database
       .prepare(
-        "SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM bookly_occupied_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${date}T00:00`, `${date}T23:59`)
       .all<{ slot_start: string }>();
@@ -97,7 +138,8 @@ export async function POST(request: Request) {
       new Date(),
       settings,
     );
-    if (!availableTimes.includes(time)) {
+    const checked = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, [{ date, times: availableTimes }]);
+    if (!checked[0].times.includes(time)) {
       return Response.json(
         { error: "That time was just booked. Please choose another time." },
         { status: 409 },
@@ -146,8 +188,8 @@ export async function POST(request: Request) {
             id, reference, service_id, service_name, duration_minutes, price_cents,
             appointment_date, start_time, end_time, customer_name, customer_email,
             customer_phone, notes, status, payment_method, payment_status, payment_expires_at,
-            customer_account_id, handling_minutes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            customer_account_id, handling_minutes, booking_request_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           appointmentId,
@@ -169,6 +211,7 @@ export async function POST(request: Request) {
           paymentExpiresAt,
           customer.id,
           settings.handlingBufferMinutes,
+          requestId,
         ),
       ...makeSlotKeys(date, time, durationMinutes + settings.handlingBufferMinutes).map((slot) =>
         database
@@ -178,6 +221,10 @@ export async function POST(request: Request) {
     ];
 
     await database.batch(statements);
+    reserved = true;
+    // Write the hold to Bookly before checkout or confirmation. Bookly rejects a
+    // slot taken there since the last snapshot; the hold is then cancelled.
+    await pushBooklyChanges(database, [appointmentId]);
 
     if (paymentMethod === "stripe") {
       try {
@@ -213,8 +260,9 @@ export async function POST(request: Request) {
       } catch (error) {
         await database.batch([
           database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(appointmentId),
-          database.prepare("DELETE FROM appointments WHERE id = ?").bind(appointmentId),
+          database.prepare("UPDATE appointments SET status='payment_expired',payment_status='expired' WHERE id=?").bind(appointmentId),
         ]);
+        try { await pushBooklyChanges(database, [appointmentId]); } catch { /* Persistent retry retains the cancellation. */ }
         console.error("Stripe Checkout creation failed", error);
         return Response.json(
           { error: "Online checkout could not start. Choose cash or try again." },
@@ -264,6 +312,12 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error) {
+    if (error instanceof BooklyConflict) return Response.json({ error: "That time was just booked. Please choose another time." }, { status: 409 });
+    if (error instanceof BooklyUnavailable) {
+      return Response.json({ error: reserved
+        ? "The calendar connection was interrupted. Your request is retained; retry this same form before starting another booking."
+        : "Online booking is temporarily unavailable. Please try again shortly." }, { status: 503 });
+    }
     const message = error instanceof Error ? error.message : "";
     if (message.includes("UNIQUE") || message.includes("constraint") || message.includes("Slot unavailable")) {
       return Response.json(

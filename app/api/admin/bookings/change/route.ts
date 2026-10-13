@@ -1,3 +1,4 @@
+import { assertBooklyFresh, pushAfterCommit, BooklyConflict } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -21,15 +22,18 @@ export async function POST(request: Request) {
   if (payload.action === "reschedule" && (!payload.date || !payload.time)) return Response.json({ error: "Choose a date and time." }, { status: 400 });
   try {
     const database = getD1();
+    await assertBooklyFresh(database);
     const stored = await readBookingSettings(database);
     const booking = await database.prepare("SELECT * FROM appointments WHERE reference = ?").bind(payload.reference).first<ManagedBooking>();
     if (!booking) return Response.json({ error: "Booking not found." }, { status: 404 });
     if (booking.revision !== payload.revision) throw new BookingConflict("The booking changed. Refresh and try again.");
     const target = payload.action === "reschedule" ? { date: payload.date!, time: payload.time! } : undefined;
     const change = await changeBooking(database, booking, payload.action, user.id, target, stored);
+    // Committed: refunds and notifications run even when Bookly delivery waits.
     const refundStatus = payload.action === "cancel"
       ? await refundCancelledBooking(database, booking, user.id)
       : "not_needed";
+    const calendar = await pushAfterCommit(database, [booking.id]);
     let notificationsSent = true;
     if (payload.action !== "complete" && booking.customer_email) {
       notificationsSent = await sendBookingChangeNotification(
@@ -45,9 +49,10 @@ export async function POST(request: Request) {
       revision: change.revision + (refundStatus === "refunded" ? 1 : 0),
       notificationsSent,
       refundStatus,
+      calendar,
     });
   } catch (error) {
-    if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof BookingConflict || error instanceof BooklyConflict) return Response.json({ error: error.message }, { status: 409 });
     console.error("Staff booking change failed");
     return Response.json({ error: "Unable to save the booking. Refresh before retrying." }, { status: 503 });
   }
