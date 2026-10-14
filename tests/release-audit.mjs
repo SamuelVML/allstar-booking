@@ -661,6 +661,49 @@ await check('R8 "keep local" works for a rejected command whose Bookly twin neve
   assert.equal(remoteOf(linked.id).time, '11:00'); assert.equal((await booklyStatus()).body.conflicts.length, 0);
 });
 
+/* ------------------------------------------- Codex re-review of b7cc10d */
+await check('R9 "keep Bookly" is refused for a service change that coincides with a local edit', async () => {
+  markFresh(); const date = openDay();
+  const changed = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [changed.id]);
+  remoteRow({ ...remoteOf(changed.id), durationMinutes: 45 });
+  db.prepare("UPDATE appointments SET notes='edited locally',revision=revision+1 WHERE id=?").run(changed.id);
+  await syncRun();
+  assert.ok(db.prepare('SELECT 1 FROM bookly_conflicts WHERE local_id=?').get(changed.id));
+  const refused = await booklyAction({ action: 'resolve', localId: changed.id, keep: 'bookly' });
+  assert.equal(refused.status, 409, 'not reported as resolved');
+  assert.equal(db.prepare('SELECT resolution FROM bookly_conflicts WHERE local_id=?').get(changed.id).resolution, null, 'the conflict stays held');
+});
+await check('R10 "keep Bookly" is refused for a record Bookly never accepted', async () => {
+  markFresh(); const date = openDay();
+  remoteRow({ date, time: '10:00' });
+  const unlinked = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [unlinked.id]).catch(() => {});
+  assert.ok(db.prepare('SELECT 1 FROM bookly_conflicts WHERE local_id=?').get(unlinked.id), 'the first export is held');
+  assert.equal(db.prepare('SELECT 1 FROM bookly_links WHERE local_id=?').get(unlinked.id), undefined);
+  const refused = await booklyAction({ action: 'resolve', localId: unlinked.id, keep: 'bookly' });
+  assert.equal(refused.status, 409, 'Bookly has no version to keep');
+  assert.ok(db.prepare('SELECT 1 FROM bookly_conflicts WHERE local_id=?').get(unlinked.id), 'the conflict stays held');
+});
+await check('R11 a command discarded while in flight does not settle as delivered; its record is held again', async () => {
+  markFresh(); const date = openDay();
+  const held = await heldConflict(date);
+  await syncRun();
+  assert.equal((await booklyAction({ action: 'resolve', localId: held.id, keep: 'local' })).status, 200);
+  const delivered = () => db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='done'").get(held.id).n;
+  const deliveredBefore = delivered();
+  beforeCommand = async () => { assert.equal((await booklyAction({ action: 'resolve', localId: held.id, keep: 'bookly' })).status, 200); };
+  await syncRun();
+  assert.equal(remoteOf(held.id).notes, 'edited locally', 'the in-flight write reached Bookly');
+  assert.equal(delivered(), deliveredBefore, 'the discarded command is not marked delivered');
+  const conflict = db.prepare('SELECT resolution FROM bookly_conflicts WHERE local_id=?').get(held.id);
+  assert.ok(conflict, 'the record is still held'); assert.equal(conflict.resolution, null, 'staff choose again, knowing Bookly changed');
+  assert.equal((await booklyAction({ action: 'resolve', localId: held.id, keep: 'bookly' })).status, 200);
+  assert.equal((await syncRun()).ok, true);
+  assert.equal(appointment(held.id).notes, 'edited locally', 'Bookly\'s version is adopted');
+  assert.equal((await booklyStatus()).body.conflicts.length, 0, 'the resolution completes');
+});
+
 console.log(results.join('\n'));
 if (failures) { console.error(`${failures} release-audit regression(s) failed`); process.exit(1); }
 console.log('PASS: release audit findings 1-8 (deletion race, rejected reschedule, conflict isolation, refund recovery, lease fencing, stored notification payloads, provider key window, checkout recovery)');
