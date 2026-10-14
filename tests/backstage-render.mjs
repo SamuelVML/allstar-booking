@@ -258,6 +258,28 @@ assert.match(output.settings, /Opening hours/);
 assert.match(output.settings, /Handling buffer/);
 assert.match(output.settings, new RegExp(STAFF.email.replace('.', '\\.')), 'the signed-in staff email is shown');
 assert.ok(!/CF_ACCESS|STRIPE_SECRET|ADMIN_EMAILS/.test(output.settings), 'no configuration is leaked to the page');
+assert.match(output.settings, /Needs attention/);
+
+// Short when empty, so rendered without the size check.
+output.attentionEmpty = renderToStaticMarkup(await load('app/admin/attention/page.tsx').default());
+assert.match(output.attentionEmpty, /Nothing is waiting for a decision/);
+{
+  // A cancellation email whose delivery is unknown, and a record held for Bookly.
+  const id = db.prepare('SELECT id, reference FROM appointments LIMIT 1').get();
+  db.prepare(`INSERT INTO booking_changes (id, appointment_id, revision, action, actor_id, previous_date, previous_time)
+    VALUES ('render-change', ?, 9001, 'cancel', 'render', '2026-09-22', '10:00')`).run(id.id);
+  db.prepare(`INSERT INTO booking_obligations (id, appointment_id, change_id, kind, status, attempts, last_error)
+    VALUES ('notify/render-change', ?, 'render-change', 'notify', 'reconcile', 3, 'Delivery outcome unknown.')`).run(id.id);
+  db.prepare(`INSERT INTO bookly_conflicts (local_id, reason) VALUES (?, 'Both calendars changed.')`).run(id.id);
+  output.attention = await render('app/admin/attention/page.tsx', {});
+  assert.match(output.attention, new RegExp(id.reference), 'the email is listed with its booking');
+  assert.match(output.attention, /Ask the customer whether they received it/);
+  assert.match(output.attention, /Received/); assert.match(output.attention, /Resend/); assert.match(output.attention, /Dismiss/);
+  assert.match(output.attention, /Both calendars changed\./, 'the held calendar record is listed');
+  db.prepare(`DELETE FROM bookly_conflicts`).run();
+  db.prepare(`DELETE FROM booking_obligations WHERE id = 'notify/render-change'`).run();
+  db.prepare(`DELETE FROM booking_changes WHERE id = 'render-change'`).run();
+}
 
 /* ------------------------------------- the Samaritan panel's wiring (PR #2) */
 
@@ -307,6 +329,7 @@ for (const page of [
   'app/admin/customers/page.tsx',
   'app/admin/revenue/page.tsx',
   'app/admin/settings/page.tsx',
+  'app/admin/attention/page.tsx',
 ]) {
   await assert.rejects(
     () => render(page, {}),

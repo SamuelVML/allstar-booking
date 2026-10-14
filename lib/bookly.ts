@@ -56,7 +56,10 @@ type State = {
   serviceId: string; date: string; time: string; durationMinutes: number; handlingMinutes: number;
   status: string; customerName: string; customerEmail: string; customerPhone: string; notes: string; paymentStatus: string;
 };
-type Command = { id: string; localId: string; kind: "appointment" | "block"; expectedVersion: string; state: State };
+/** `replaceDeletedLink`: staff kept the local version of a record deleted in
+ * Bookly, so the Worker recreates it unlinked. The plugin then replaces its own
+ * stale link, but only when that link's Bookly appointment no longer exists. */
+type Command = { id: string; localId: string; kind: "appointment" | "block"; expectedVersion: string; state: State; replaceDeletedLink?: true };
 
 /** Records held for staff reconciliation (rejected commands Bookly will not
  * accept as sent, and bookings both calendars changed). Each one is isolated
@@ -153,10 +156,11 @@ export async function filterBooklyTimes(serviceId: string, durationMinutes: numb
   });
 }
 
-async function enqueue(database: D1Database, localId: string, kind: "appointment" | "block", state: State, link?: Link) {
+async function enqueue(database: D1Database, localId: string, kind: "appointment" | "block", state: State, link?: Link, recreate = false) {
   const localDigest = await digest(state);
   if (link?.local_digest === localDigest) return null;
-  const command: Command = { id: crypto.randomUUID(), localId, kind, state, expectedVersion: link?.remote_version ?? "" };
+  const command: Command = { id: crypto.randomUUID(), localId, kind, state, expectedVersion: link?.remote_version ?? "",
+    ...(recreate && !link ? { replaceDeletedLink: true as const } : {}) };
   return database.prepare("INSERT OR IGNORE INTO bookly_commands(id, local_id, payload, digest) VALUES (?, ?, ?, ?)")
     .bind(command.id, localId, JSON.stringify(command), localDigest);
 }
@@ -197,14 +201,20 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
   // delivery (the partial unique index would ignore the insert anyway). A held
   // record gets nothing until staff reconcile it, so no later change for it can
   // overtake the held one; other records are unaffected.
-  const pending = new Set((await database.prepare(`SELECT local_id FROM bookly_commands WHERE status IN ('pending','held')
-    UNION SELECT local_id FROM bookly_conflicts WHERE resolution IS NULL`).all<{ local_id: string }>()).results.map(row => row.local_id));
+  // In the same read: records staff kept locally that Bookly has not accepted
+  // yet. An unlinked one was deleted in Bookly (resolveBooklyConflict removed
+  // its link) and is recreated, replacing the plugin's stale link.
+  const blocking = (await database.prepare(`SELECT local_id, 0 AS kept FROM bookly_commands WHERE status IN ('pending','held')
+    UNION SELECT local_id, 0 AS kept FROM bookly_conflicts WHERE resolution IS NULL
+    UNION SELECT local_id, 1 AS kept FROM bookly_conflicts WHERE resolution = 'local'`).all<{ local_id: string; kept: number }>()).results;
+  const pending = new Set(blocking.filter(row => !row.kept).map(row => row.local_id));
+  const keptLocal = new Set(blocking.filter(row => row.kept).map(row => row.local_id));
   const inserts: D1PreparedStatement[] = [];
   const rows = (await database.prepare("SELECT * FROM appointments WHERE source != 'bookly'").all<Row>()).results;
   for (const row of rows) {
     if ((wanted && !wanted.has(row.id)) || pending.has(row.id)) continue;
     const state = exportableAppointment(row, linkOf(row.id), today);
-    const insert = state && await enqueue(database, row.id, "appointment", state, linkOf(row.id));
+    const insert = state && await enqueue(database, row.id, "appointment", state, linkOf(row.id), keptLocal.has(row.id));
     if (insert) inserts.push(insert);
   }
   const blocks = (await database.prepare("SELECT * FROM time_off").all<TimeOffRow>()).results;
@@ -212,7 +222,7 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
     const localId = `block-${block.id}`;
     if ((wanted && !wanted.has(localId)) || pending.has(localId)) continue;
     const state = exportableBlock(block, linkOf(localId), today);
-    const insert = state && await enqueue(database, localId, "block", state, linkOf(localId));
+    const insert = state && await enqueue(database, localId, "block", state, linkOf(localId), keptLocal.has(localId));
     if (insert) inserts.push(insert);
   }
   for (let start = 0; start < inserts.length; start += ENQUEUE_CHUNK) await database.batch(inserts.slice(start, start + ENQUEUE_CHUNK));

@@ -45,6 +45,8 @@ class TestDate extends Date {
 const env = { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.example.test/wp-json/allstar-bookly/v1', BOOKLY_BRIDGE_SECRET: 'x'.repeat(40),
   BOOKLY_SUBREQUEST_BUDGET: '900', RESEND_API_KEY: 're_test', BOOKING_EMAIL_FROM: 'All Star <bookings@example.test>', BOOKING_BUSINESS_NAME: 'All Star', BOOKING_ADMIN_EMAIL: '' };
 const remote = new Map(); const receipts = new Map(); let nextId = 500;
+// The plugin's allstar_bridge_links: local id -> Bookly id. Kept when the Bookly row is deleted, as in WordPress.
+const bridgeLinks = new Map();
 const calls = { snapshot: 0, availability: 0, command: 0 };
 let commandsDown = false; let bridgeDown = false; let beforeCommand = null; const commandLog = [];
 const minutes = t => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
@@ -74,6 +76,13 @@ async function bridgeFetch(url, options) {
     commandLog.push(input.localId);
     if (receipts.has(input.id)) return Response.json(receipts.get(input.id));
     const s = input.state; const existing = [...remote.values()].find(row => row.localId === input.localId);
+    const linkedId = bridgeLinks.get(input.localId);
+    if (linkedId && !remote.has(linkedId)) {
+      // Plugin: a link whose Bookly appointment is gone fails 'deleted', unless the
+      // Worker recreates deliberately (no expected version, replaceDeletedLink).
+      if (input.replaceDeletedLink === true && !input.expectedVersion) bridgeLinks.delete(input.localId);
+      else return Response.json({ code: 'deleted', message: 'Appointment was deleted in Bookly.' }, { status: 409 });
+    }
     if (existing && existing.version !== input.expectedVersion) return Response.json({ error: 'stale' }, { status: 409 });
     const status = ['payment_expired', 'removed'].includes(s.status) ? 'cancelled' : s.status;
     if (active({ status }) && [...remote.values()].some(row => row.remoteId !== existing?.remoteId && active(row) && overlaps(row, s.date, minutes(s.time), s.durationMinutes + s.handlingMinutes))) {
@@ -81,6 +90,7 @@ async function bridgeFetch(url, options) {
     }
     const row = remoteRow({ ...(existing ? { remoteId: existing.remoteId } : {}), localId: input.localId, kind: input.kind, serviceId: s.serviceId, date: s.date, time: s.time,
       durationMinutes: s.durationMinutes, extraMinutes: s.handlingMinutes, status, customerName: s.customerName, customerEmail: s.customerEmail, notes: s.notes });
+    bridgeLinks.set(input.localId, row.remoteId);
     const receipt = { remoteId: row.remoteId, version: row.version }; receipts.set(input.id, receipt);
     return Response.json(receipt);
   }
@@ -91,12 +101,15 @@ async function bridgeFetch(url, options) {
 const stripeRefunds = new Map(); let stripeRefundCalls = 0; let stripeFailures = 0;
 const checkoutSessions = new Map(); const checkoutKeys = new Map(); let checkoutCreates = 0;
 // 'uncertain': the session is created but the response is lost; 'definite': Stripe rejects the request.
-let checkoutFailure = null; let afterCheckoutCreate = null;
+let checkoutFailure = null; let afterCheckoutCreate = null; let afterCheckoutReject = null; let beforeRefundCreate = null;
 const stripe = {
   checkout: { sessions: {
     async retrieve(id) { const session = checkoutSessions.get(id); if (!session) throw new Error('No such session'); return session; },
     async create(params, options = {}) {
       if (checkoutFailure === 'definite') { checkoutFailure = null; throw Object.assign(new Error('Invalid request'), { type: 'StripeInvalidRequestError', statusCode: 400 }); }
+      // Another request with the same key is still executing (Stripe: 409, retry later), or the key is locked (429 lock_timeout).
+      if (checkoutFailure === 'idempotency_conflict') { checkoutFailure = null; afterCheckoutReject?.(params, options); throw Object.assign(new Error('There is currently another in-progress request using this Idempotent Key'), { type: 'StripeIdempotencyError', rawType: 'idempotency_error', statusCode: 409 }); }
+      if (checkoutFailure === 'lock_timeout') { checkoutFailure = null; afterCheckoutReject?.(params, options); throw Object.assign(new Error('This object cannot be accessed right now because another API request or Stripe process is currently accessing it.'), { type: 'StripeRateLimitError', rawType: 'invalid_request_error', code: 'lock_timeout', statusCode: 429 }); }
       const key = options.idempotencyKey;
       if (key && checkoutKeys.has(key)) {
         const previous = checkoutKeys.get(key);
@@ -115,6 +128,7 @@ const stripe = {
     async expire(id) { const session = checkoutSessions.get(id); session.status = 'expired'; session.url = null; return session; } } },
   refunds: { async create(params, options) {
     stripeRefundCalls += 1;
+    if (beforeRefundCreate) { const hook = beforeRefundCreate; beforeRefundCreate = null; await hook(); }
     if (stripeFailures > 0) { stripeFailures -= 1; throw new Error('Stripe is unavailable'); }
     if (!stripeRefunds.has(options.idempotencyKey)) stripeRefunds.set(options.idempotencyKey, { id: `re_${stripeRefunds.size + 1}`, payment_intent: params.payment_intent });
     return stripeRefunds.get(options.idempotencyKey);
@@ -216,7 +230,7 @@ function reset() {
   remote.clear(); receipts.clear(); commandLog.length = 0; providerKeys.clear(); deliveries.length = 0; stripeRefunds.clear(); checkoutKeys.clear();
   stripeFailures = 0; stripeRefundCalls = 0; checkoutCreates = 0; resendConflicts = 0; resendFailures = 0; clockOffset = 0;
   commandsDown = false; bridgeDown = false; beforeCommand = null; beforeBatch = null; env.BOOKLY_SYNC_ENABLED = 'true'; env.BOOKLY_SUBREQUEST_BUDGET = '900';
-  checkoutFailure = null; afterCheckoutCreate = null; checkoutSessions.clear();
+  checkoutFailure = null; afterCheckoutCreate = null; afterCheckoutReject = null; beforeRefundCreate = null; checkoutSessions.clear(); bridgeLinks.clear();
 }
 const results = []; let failures = 0;
 async function check(name, fn) {
@@ -721,6 +735,134 @@ await check('R11 a command discarded while in flight and then rejected by Bookly
   assert.equal((await booklyStatus()).body.conflicts.length, 0);
 });
 
+
+/* ------------------------------------------- Codex re-review of f5413b4 */
+const attention = () => load('app/api/admin/attention/route.ts');
+const attentionStatus = () => attention().GET(new Request('https://allstar.test/api/admin/attention')).then(json);
+const attentionAction = body => attention().POST(new Request('https://allstar.test/api/admin/attention', { method: 'POST', body: JSON.stringify(body) })).then(json);
+await check('R12 a concurrent-request idempotency conflict (409) keeps the hold; the retry returns the session the other request created', async () => {
+  markFresh(); const body = stripeRequest();
+  // The concurrent original request completes Checkout creation under the same key.
+  afterCheckoutReject = (params, options) => { checkoutCreates += 1; const session = { id: `cs_test_${checkoutCreates}`, url: `https://checkout.example.test/${checkoutCreates}`, metadata: params.metadata, payment_status: 'unpaid' };
+    checkoutSessions.set(session.id, session); checkoutKeys.set(options.idempotencyKey, { params, session }); };
+  checkoutFailure = 'idempotency_conflict';
+  const initial = await book(body);
+  assert.equal(initial.status, 503, JSON.stringify(initial.body));
+  const row = db.prepare('SELECT * FROM appointments').get();
+  assert.equal(row.status, 'payment_pending', 'the hold is retained'); assert.equal(slotTimes(row.id).length, 8, 'the slots stay reserved');
+  const retry = await book(body);
+  assert.equal(retry.body.checkoutUrl, 'https://checkout.example.test/1', JSON.stringify(retry.body));
+  assert.equal(checkoutCreates, 1);
+});
+await check('R12 a Stripe lock timeout (429) keeps the hold', async () => {
+  markFresh(); checkoutFailure = 'lock_timeout';
+  assert.equal((await book(stripeRequest())).status, 503);
+  const row = db.prepare('SELECT * FROM appointments').get();
+  assert.equal(row.status, 'payment_pending'); assert.equal(slotTimes(row.id).length, 8);
+});
+await check('R13 a queued reschedule email stays blocked after the bridge is disabled while Bookly still has the old time', async () => {
+  markFresh(); const date = openDay();
+  const moved = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [moved.id]);
+  commandsDown = true;
+  await changeBooking({ reference: moved.reference, revision: 0, action: 'reschedule', date, time: '11:00' });
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='pending'").get(moved.id).n, 1, 'the move is queued for Bookly');
+  env.BOOKLY_SYNC_ENABLED = 'false';
+  for (let i = 0; i < 3; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
+  assert.equal(deliveriesFor(moved.reference).length, 0, 'no email for a time Bookly does not have');
+  assert.equal(db.prepare("SELECT status FROM booking_obligations WHERE kind='notify'").get().status, 'pending', 'the email still waits');
+  const listed = await attentionStatus();
+  assert.ok(listed.body.calendar.conflicts.some(item => item.local_id === moved.id), 'staff see the move that never reached Bookly');
+});
+async function reconciledNotification() {
+  env.BOOKLY_SYNC_ENABLED = 'false'; const date = openDay();
+  const unpaid = localAppointment({ appointment_date: date, start_time: '10:00' });
+  db.exec("CREATE TRIGGER test_email_commit_failure BEFORE UPDATE ON booking_obligations WHEN NEW.kind='notify' AND NEW.status='done' BEGIN SELECT RAISE(ABORT,'injected completion failure'); END");
+  await operation({ action: 'block_range', id: crypto.randomUUID(), fromDate: date, toDate: date, reason: 'Vacation', cancelConflicts: true });
+  db.exec('DROP TRIGGER test_email_commit_failure');
+  clockOffset += 25 * 60 * 60_000; providerKeys.clear();
+  await scheduled.runScheduledTasks();
+  const row = db.prepare("SELECT * FROM booking_obligations WHERE kind='notify'").get();
+  assert.equal(row.status, 'reconcile');
+  return { unpaid, row };
+}
+await check('R14 staff see a notification moved to reconciliation, with its instruction', async () => {
+  const { row } = await reconciledNotification();
+  const listed = await attentionStatus();
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  const item = listed.body.notifications.find(item => item.id === row.id);
+  assert.ok(item, 'the reconcile notification is listed'); assert.equal(item.status, 'reconcile'); assert.match(item.last_error, /confirm with the customer/i);
+  assert.ok(item.reference && item.customer_email, 'with the booking it concerns');
+});
+await check('R14 staff resolve a reconcile notification as delivered: closed, audited, nothing resent', async () => {
+  const { unpaid, row } = await reconciledNotification();
+  const resolved = await attentionAction({ action: 'resolve_notification', id: row.id, decision: 'delivered' });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved.body));
+  const after = db.prepare('SELECT status,outcome,last_error FROM booking_obligations WHERE id=?').get(row.id);
+  assert.equal(after.status, 'done'); assert.equal(after.outcome, 'staff_confirmed_delivered'); assert.match(after.last_error, /staff-1/);
+  await scheduled.runScheduledTasks();
+  assert.equal(deliveriesFor(unpaid.reference).length, 1, 'nothing resent');
+  assert.equal((await attentionStatus()).body.notifications.length, 0);
+  assert.equal((await attentionAction({ action: 'resolve_notification', id: row.id, decision: 'dismiss' })).status, 409, 'a closed notification cannot be resolved twice');
+});
+await check('R14 staff resend a reconcile notification once, under a new provider key', async () => {
+  const { unpaid, row } = await reconciledNotification();
+  providerKeys.set(`booking-change/${row.change_id}/0`, { stale: true }); // were the old key still known, reuse would be refused
+  assert.equal((await attentionAction({ action: 'resolve_notification', id: row.id, decision: 'resend' })).status, 200);
+  await scheduled.runScheduledTasks(); await scheduled.runScheduledTasks();
+  assert.equal(deliveriesFor(unpaid.reference).length, 2, 'exactly one resend');
+  assert.equal(resendConflicts, 0);
+  const after = db.prepare('SELECT status,outcome FROM booking_obligations WHERE id=?').get(row.id);
+  assert.equal(after.status, 'done'); assert.equal(after.outcome, 'sent');
+});
+await check('R14 held Bookly records are listed for staff even while synchronization is disabled', async () => {
+  markFresh(); const held = await heldConflict(openDay());
+  await syncRun();
+  assert.ok(db.prepare("SELECT 1 FROM bookly_commands WHERE local_id=? AND status='held' UNION SELECT 1 FROM bookly_conflicts WHERE local_id=?").get(held.id, held.id), 'held');
+  env.BOOKLY_SYNC_ENABLED = 'false';
+  const listed = await attentionStatus();
+  assert.equal(listed.status, 200);
+  assert.ok(listed.body.calendar.conflicts.some(item => item.local_id === held.id), JSON.stringify(listed.body.calendar));
+});
+await check('R15 a refund worker that fails after another recorded the refund does not overwrite the success', async () => {
+  const refunds = load('lib/refunds.ts'); markFresh(); const date = openDay();
+  const paid = paidAppointment(date, '10:00');
+  db.prepare("UPDATE appointments SET status='cancelled' WHERE id=?").run(paid.id);
+  db.prepare("DELETE FROM appointment_slots WHERE appointment_id=?").run(paid.id);
+  const booking = appointment(paid.id);
+  beforeRefundCreate = async () => { assert.equal(await refunds.refundCancelledBooking(database, booking, 'staff-1'), 'refunded'); stripeFailures = 1; };
+  const late = await refunds.refundCancelledBooking(database, booking, 'booking-obligation', { automatic: true });
+  const record = refundRow(paid.id);
+  assert.equal(record.status, 'succeeded', 'the recorded success stands'); assert.equal(record.attempts, 0);
+  assert.equal(appointment(paid.id).payment_status, 'refunded');
+  assert.equal(late, 'refunded', 'the late worker reports the recorded outcome');
+  assert.equal(stripeRefunds.size, 1);
+});
+await check('R16 "keep local" for a booking deleted in Bookly recreates it, replacing the plugin\'s stale link', async () => {
+  markFresh(); const date = openDay();
+  const kept = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [kept.id]);
+  remote.delete(remoteOf(kept.id).remoteId); // deleted in Bookly; the plugin keeps its link row
+  db.prepare("UPDATE appointments SET notes='edited locally',revision=revision+1 WHERE id=?").run(kept.id);
+  await syncRun(); await syncRun();
+  assert.equal(db.prepare('SELECT remote_version FROM bookly_conflicts WHERE local_id=?').get(kept.id)?.remote_version, 'deleted', 'held as deleted in Bookly');
+  assert.equal((await booklyAction({ action: 'resolve', localId: kept.id, keep: 'local' })).status, 200);
+  assert.equal((await syncRun()).ok, true);
+  assert.ok(remoteOf(kept.id), 'recreated in Bookly'); assert.equal(remoteOf(kept.id).notes, 'edited locally');
+  assert.equal((await syncRun()).ok, true);
+  assert.equal((await booklyStatus()).body.conflicts.length, 0, 'the resolution completes');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='held'").get(kept.id).n, 0);
+});
+await check('R16 a recreation never replaces a link whose Bookly appointment still exists', async () => {
+  markFresh(); const date = openDay();
+  const linked = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [linked.id]);
+  const response = await bridgeFetch('https://wp.example.test/wp-json/allstar-bookly/v1/command', { body: JSON.stringify({ id: crypto.randomUUID(), localId: linked.id, kind: 'appointment', expectedVersion: '', replaceDeletedLink: true,
+    state: { serviceId: 'haircut', date, time: '12:00', durationMinutes: 30, handlingMinutes: 10, status: 'confirmed', customerName: 'x', customerEmail: 'x@example.test', customerPhone: '0600000000', notes: '', paymentStatus: 'due_at_shop' } }) });
+  assert.equal(response.status, 409, 'the double, like the plugin, requires the current version for a live link');
+  assert.equal(remoteOf(linked.id).time, '10:00');
+});
+
 console.log(results.join('\n'));
 if (failures) { console.error(`${failures} release-audit regression(s) failed`); process.exit(1); }
-console.log('PASS: release audit findings 1-8 (deletion race, rejected reschedule, conflict isolation, refund recovery, lease fencing, stored notification payloads, provider key window, checkout recovery)');
+console.log('PASS: release audit findings 1-8 and Codex re-review R1-R16 (deletion race, rejected reschedule, conflict isolation, refund recovery, lease fencing, stored notification payloads, provider key window, checkout recovery)');

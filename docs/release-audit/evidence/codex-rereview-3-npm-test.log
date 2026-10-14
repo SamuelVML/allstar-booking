@@ -1,0 +1,194 @@
+
+> site-creator-vinext-starter@0.1.0 test
+> npm run test:booking-management && node tests/native-api.mjs && npm run test:backstage && node tests/booking-email-retry.mjs && npm run test:backstage-render && npm run test:bookly
+
+
+> site-creator-vinext-starter@0.1.0 test:booking-management
+> node tests/booking-management.mjs
+
+(node:39402) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: signed staff tokens, spoofed headers, issuer/audience/expiry/allowlist, CSRF and protected routes
+Automatic Stripe refund failed retryable Error: Temporary Stripe failure
+    at Object.create (file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/booking-management.mjs:29:19)
+    at refundCancelledBooking (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/refunds.ts:55:45)
+    at async Object.POST (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/admin/bookings/change/route.ts:73:15)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/booking-management.mjs:167:30
+PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety
+PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations
+PASS: editable settings persist with revision checks and full-day time off uses configured hours
+PASS: real-time cutoffs, compact-gap ranking and distinct-day customer recommendations
+(node:39424) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: native API rejects missing/wrong audience/outsider tokens before DB access; date filtering, literal search, customer history, ranked Backstage recommendations, no-store and minimal fields
+
+> site-creator-vinext-starter@0.1.0 test:backstage
+> node tests/backstage.mjs
+
+PASS: payment state, day model, walk-in slots, next up and revenue semantics
+PASS: customers get two unexplained times, Backstage explanations stay behind staff auth
+(node:39469) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: booking email retries transient failures without duplicating sends
+
+> site-creator-vinext-starter@0.1.0 test:backstage-render
+> node tests/backstage-render.mjs
+
+PASS: all five Backstage screens render, Samaritan asks the protected endpoint on the 30s cadence, and every page refuses unauthenticated visitors
+PASS: homepage booking CTA and service rows render native booking links
+(node:39499) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+> site-creator-vinext-starter@0.1.0 test:bookly
+> node tests/bookly.mjs && node tests/bookly-hardening.mjs && node tests/bookly-review-fixes.mjs && node tests/bookly-budget.mjs && node tests/stripe-test-mode.mjs && node tests/vacation-cancellation.mjs && node tests/release-audit.mjs && node tests/migration-0010.mjs
+
+(node:39544) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: opt-in, signed requests, native import, external payment ownership, conservative slots and live schedule filtering
+PASS: persistent replay after lost response, no duplicates, Bookly reschedule, Stripe cancellation refund once
+PASS: incomplete snapshots fail closed, native updates, competing-edit hold and synchronization lease
+PASS: unsigned scheduler callback rejected before synchronization
+(node:39571) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: activation skips historical, cancelled, expired and completed rows; preserves future bookings and occupancy; imports only current native rows; idempotent
+Scheduled Bookly sync failed Calendar synchronization is in progress. Try again shortly.
+PASS: availability and bookings use live day checks and single-command pushes; no request path takes a snapshot; lease overlap is harmless
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:48:15)
+    at async Object.GET (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/availability/route.ts:37:9)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/bookly-hardening.mjs:207:15
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:48:15)
+    at async Object.GET (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/availability/route.ts:37:9)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/bookly-hardening.mjs:208:15
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:48:15)
+    at async Object.GET (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/availability/route.ts:37:9)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/bookly-hardening.mjs:215:15
+Scheduled Bookly sync failed Bookly could not be reached. Refresh before retrying.
+Availability lookup failed BooklyUnavailable [Error]: Calendar availability is out of date. Try again shortly.
+    at assertBooklyFresh (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:48:15)
+    at async Object.GET (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/availability/route.ts:37:9)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/bookly-hardening.mjs:221:15
+Availability lookup failed BooklyUnavailable [Error]: Bookly could not be reached. Refresh before retrying.
+    at booklyRequest (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:136:15)
+    at async filterBooklyTimes (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/lib/bookly.ts:156:16)
+    at async Object.GET (/Users/axissolutions/Developer/allstar-booking-rc-codex-findings/app/api/availability/route.ts:77:26)
+    at async file:///Users/axissolutions/Developer/allstar-booking-rc-codex-findings/tests/bookly-hardening.mjs:225:15
+PASS: 180-second occupancy bound; stale, missing or unreachable Bookly closes availability, recommendations and bookings without reserving
+PASS: concurrent same-slot requests yield one booking; post-snapshot Bookly bookings are rejected by the live check or Bookly arbitration; request-time links survive a concurrent snapshot
+(node:39586) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS backlog of 100 drains in bounded runs
+PASS backlog of 101 drains in bounded runs
+PASS backlog of 250 drains in bounded runs
+PASS backlog of 250 recovers after a lost response and an outage
+PASS request-path push reaches its own command behind a large backlog
+PASS retry_refund and shop payments work while Bookly occupancy is stale
+PASS repeated refund retries never refund twice
+PASS a concurrent edit during a vacation cancels, refunds and emails nothing; a retry does each once
+PASS a failed refund during vacation cancellation stays durably retryable
+PASS a payment completed after the hold expired never shows a confirmation
+PASS a late payment whose refund failed reports the pending refund, not a booking
+PASS a walk-in taken in Bookly after the live check is reported as failed
+PASS a walk-in Bookly has not confirmed is not reported as added
+PASS: bounded resumable backlog (100/101/250, interruption, lost response), refund retries during outages, partial vacation cancellation, refunded late payments, walk-ins rejected by Bookly
+(node:39617) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS budget configuration: default fits Workers Free, values are clamped
+PASS default budget 40: idle run with 1,000 unchanged Bookly rows stays within budget (import runs=32, peak=39, idle run=16)
+PASS default budget 40: backlog of 250 drains in bounded runs with occupancy kept fresh (runs=51, peak=31)
+PASS default budget 40: backlog survives a lost response and an outage
+PASS default budget 40: refund retries resume across runs, each refund exactly once (runs=7, peak=37)
+PASS default budget 40: bookings deleted in Bookly are cancelled and refunded as one unit (runs=5, peak=35)
+PASS budget 900: idle run with 1,000 unchanged Bookly rows stays within budget (import runs=2, peak=899, idle run=16)
+PASS budget 900: backlog of 250 drains in bounded runs with occupancy kept fresh (runs=3, peak=321)
+PASS budget 900: backlog survives a lost response and an outage
+PASS budget 900: refund retries resume across runs, each refund exactly once (runs=1, peak=156)
+PASS budget 900: bookings deleted in Bookly are cancelled and refunded as one unit (runs=1, peak=121)
+PASS an exhausted budget records its state and releases the lease
+PASS: Bookly sync stays within the per-invocation subrequest budget (default 40 and 900) across idle runs, 250-command backlogs, lost responses, outages, refund retries and Bookly deletions
+PASS: STRIPE_REQUIRE_TEST_MODE refuses live and restricted-live keys; production unchanged when unset
+(node:39631) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS paid and unpaid bookings inside opening hours: cancelled, slots released, vacation blocked, one refund and one email each
+PASS a pending online payment in the period refuses the vacation and changes nothing
+PASS a booking edited concurrently rolls back every cancellation and the vacation
+PASS a booking cancelled or paid concurrently rolls everything back
+PASS a booking created concurrently inside the vacation rolls everything back (overlap trigger kept)
+PASS a database failure inside the transaction rolls everything back
+PASS a refund that fails after commit is retried by the Cron task, refunded once, email sent once
+PASS an email that fails after commit is retried with the same idempotency key and delivered once
+PASS a worker crash after the Stripe refund is recovered without a duplicate refund
+PASS concurrent processors claim each obligation once
+PASS an obligation stops after its last attempt and stays visible
+  (40 obligations: 12 Cron runs, peak 34 subrequests)
+PASS the Cron task stays within the subrequest budget and resumes a large obligation queue
+PASS an exhausted obligation left pending by a crash is marked failed without another call
+PASS a worker whose lease expired cannot overwrite the result of the worker that reclaimed it
+  (5 obligations behind a 200-command Bookly backlog: 5 Cron runs, peak 32 subrequests, 196 commands still queued)
+PASS a large Bookly backlog cannot starve refund and email obligations in the Cron task
+PASS ordinary time blocks and conflict previews behave as before
+PASS: atomic vacation cancellation (paid, unpaid, pending payment, concurrent edits, concurrent bookings, storage failure) and idempotent, retryable refund and email obligations
+(node:39639) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Staff resolved a customer email {
+  id: 'notify/c7d9311f-11a0-4eb4-bb04-8f0604c53c47',
+  decision: 'delivered',
+  actor: 'staff-1'
+}
+Staff resolved a customer email {
+  id: 'notify/95449da7-65e6-4ecc-956b-d2fae991ccfa',
+  decision: 'resend',
+  actor: 'staff-1'
+}
+PASS F1 a staff edit racing a Bookly deletion keeps the booking and its slots; the time cannot be double-booked
+PASS F1 an unraced Bookly deletion still cancels, releases the slots and refunds once
+PASS F2 a reschedule Bookly rejects is reported as rejected, not notified, and restored to its original time
+PASS F2 a reschedule queued while Bookly is unreachable is notified only after Bookly accepts it
+PASS F2 a queued reschedule Bookly rejects later is restored and never notified
+PASS F2 a reschedule Bookly accepts is confirmed and notified once (unchanged)
+PASS F3 one conflicted command is held; snapshots, exports and refunds continue
+PASS F3 later changes to a held booking wait behind its conflict (ordering preserved)
+PASS F3 conflict isolation is bounded: too many held records stop synchronization
+PASS F3 staff resolve a held conflict by keeping the Bookly version
+PASS F3 staff resolve a held conflict by keeping the local version
+PASS F4 a failed refund for a Bookly cancellation is retried automatically with backoff, once
+PASS F4 a failed late-payment refund is retried by the Cron task even with Bookly disabled
+PASS F4 a refund that keeps failing stops after its last automatic attempt and stays retryable by staff
+PASS F5 a worker that lost its lease commits no cancellation and no refund
+PASS F5 a worker that lost its lease cannot cancel a booking deleted in Bookly
+PASS F6 a notification retry sends the stored payload under the same key
+PASS F7 an uncertain delivery older than the provider key window goes to reconciliation, not a resend
+PASS F7 an uncertain delivery inside the window is retried under the same key and completes once
+PASS F8 retrying an interrupted pre-checkout request resumes payment without a second booking
+PASS F8 concurrent retries of one request create one Checkout Session
+PASS F8 an interruption after Checkout creation recovers the same session on retry
+PASS F8 a cash booking retry still confirms once (unchanged)
+PASS R2 refund retries are not starved by a persistent notification backlog
+PASS R3 overlapping checkout retries return the stored session; the losing session is expired
+PASS R4 resolving a held reschedule as "keep Bookly" keeps its email blocked until Bookly is adopted
+PASS R4 resolving a held reschedule as "keep local" sends its email only after Bookly accepts it
+PASS R5 a Checkout creation with an uncertain outcome keeps the hold, and the retry recovers the session
+PASS R5 a Checkout creation Stripe rejects still releases the hold (unchanged)
+PASS R6 a worker that lost its lease during a command request does not overwrite the newer link
+PASS R7 "keep Bookly" is refused for a service or duration change it cannot apply
+PASS R8 "keep local" works for a rejected command whose Bookly twin never changed
+PASS R9 "keep Bookly" is refused for a service change that coincides with a local edit
+PASS R10 "keep Bookly" is refused for a record Bookly never accepted
+PASS R11 a command discarded while in flight does not settle as delivered; its record is held again
+PASS R11 a command discarded while in flight and then rejected by Bookly settles nothing
+PASS R12 a concurrent-request idempotency conflict (409) keeps the hold; the retry returns the session the other request created
+PASS R12 a Stripe lock timeout (429) keeps the hold
+PASS R13 a queued reschedule email stays blocked after the bridge is disabled while Bookly still has the old time
+PASS R14 staff see a notification moved to reconciliation, with its instruction
+PASS R14 staff resolve a reconcile notification as delivered: closed, audited, nothing resent
+PASS R14 staff resend a reconcile notification once, under a new provider key
+PASS R14 held Bookly records are listed for staff even while synchronization is disabled
+PASS R15 a refund worker that fails after another recorded the refund does not overwrite the success
+PASS R16 "keep local" for a booking deleted in Bookly recreates it, replacing the plugin's stale link
+PASS R16 a recreation never replaces a link whose Bookly appointment still exists
+PASS: release audit findings 1-8 and Codex re-review R1-R16 (deletion race, rejected reschedule, conflict isolation, refund recovery, lease fencing, stored notification payloads, provider key window, checkout recovery)
+PASS: migration 0010 upgrades a populated 0009 database in order, keeps every row, and enforces the rebuilt constraints
+(node:39660) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)

@@ -316,7 +316,16 @@ final class AllStar_Bookly_Bridge {
         $link = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}allstar_bridge_links WHERE local_id = %s", $input['localId']), ARRAY_A);
         $appointment = $link ? \Bookly\Lib\Entities\Appointment::find((int)$link['appointment_id']) : null;
         $ca = $link ? \Bookly\Lib\Entities\CustomerAppointment::find((int)$link['ca_id']) : null;
-        if ($link && (!$appointment || !$ca)) { self::fail('deleted', 'Appointment was deleted in Bookly.'); }
+        if ($link && (!$appointment || !$ca)) {
+            // Staff kept the website version of a booking deleted in Bookly: the
+            // Worker recreates it without an expected version. Only then, and only
+            // because the linked Bookly appointment is gone, the stale link is
+            // replaced (inside this command's transaction). A live link is never
+            // replaced: it still requires the current version below.
+            if (($input['replaceDeletedLink'] ?? false) !== true || ($input['expectedVersion'] ?? '') !== '') { self::fail('deleted', 'Appointment was deleted in Bookly.'); }
+            if ($wpdb->delete($wpdb->prefix . 'allstar_bridge_links', array('local_id' => $input['localId'])) === false) { self::fail('db', 'Could not replace the deleted link.', 503); }
+            $link = null; $appointment = null; $ca = null;
+        }
         if ($link) {
             $matching = null;
             foreach (self::rows() as $row) { if ((string)$row['ca_id'] === (string)$link['ca_id']) { $matching = self::shape($row); break; } }

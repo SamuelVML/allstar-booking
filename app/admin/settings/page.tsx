@@ -5,6 +5,10 @@ import { getStaffUser } from "@/lib/staff-auth";
 import { readBookingSettings } from "@/lib/booking-settings";
 import { environmentLabel } from "@/lib/backstage-view";
 import { stripeIsConfigured } from "@/lib/stripe";
+import { getD1 } from "@/db";
+import { MAX_REFUND_ATTEMPTS } from "@/lib/refunds";
+import { attentionItems } from "@/lib/staff-attention";
+import { booklyEnabled } from "@/lib/bookly";
 import SettingsForm from "./settings-form";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +21,8 @@ export default async function SettingsPage() {
   const host = requestHeaders.get("host") ?? "";
   const environment = environmentLabel(host);
   const { settings, revision } = await readBookingSettings();
+  const attention = await attentionItems(getD1(), MAX_REFUND_ATTEMPTS, !booklyEnabled());
+  const waiting = attention.notifications.length + attention.refunds.length + attention.calendar.conflicts.length;
 
   return (
     <>
@@ -43,6 +49,18 @@ export default async function SettingsPage() {
           <Link className="btn btn-outline btn-xs" href="/cdn-cgi/access/logout" prefetch={false}>
             Sign out
           </Link>
+        </div>
+
+        <div className="setting-row">
+          <span>
+            <strong>Needs attention</strong>
+            <span className="sub">
+              {waiting === 0 ? "Nothing waiting for a decision" : `${waiting} waiting: customer emails, refunds or calendar records`}
+            </span>
+          </span>
+          <a className={waiting === 0 ? "btn btn-outline btn-xs" : "btn btn-xs"} href="/admin/attention">
+            Review
+          </a>
         </div>
 
         <div className="setting-row">
