@@ -18,7 +18,7 @@ import {
 import { ArrowLeft, Check, Close } from "@/lib/icons";
 import SamaritanPanel from "./samaritan-panel";
 
-const BOOKABLE = SERVICES.filter((service) => !service.isAddOn);
+const BOOKABLE = SERVICES;
 const RESCHEDULE_DAYS = 14;
 
 type TimeOffConflict = {

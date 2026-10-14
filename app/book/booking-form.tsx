@@ -9,7 +9,6 @@ import {
   SERVICES,
 } from "@/lib/booking";
 import {
-  COLOUR_ADD_ON_SUFFIX,
   COPY,
   type Language,
   locale,
@@ -22,8 +21,6 @@ import SuccessView, { type Booking } from "./success-view";
 const TOTAL_STEPS = 7;
 /** Customer-facing recommendations and availability refresh once a minute. */
 const CUSTOMER_REFRESH_MS = 60_000;
-const COLOUR_ADD_ON_MINUTES = 30;
-const COLOUR_ADD_ON_CENTS = 2250;
 const PHONE = "+31686357350";
 
 /**
@@ -49,7 +46,6 @@ type BookingInput = {
   phone: string;
   notes?: string;
   acceptedTerms: boolean;
-  colourAddOn: boolean;
   paymentMethod: "cash" | "stripe";
   reminderOptIn: boolean;
   marketingConsent: boolean;
@@ -139,14 +135,12 @@ function candidateTimes(
 
 export default function BookingForm({
   initialService,
-  initialColourAddOn,
   initialLanguage,
   stripeEnabled,
   today,
   bookingSettings,
 }: {
   initialService: string;
-  initialColourAddOn: boolean;
   initialLanguage: Language;
   stripeEnabled: boolean;
   /** Today in Europe/Amsterdam, resolved on the server. */
@@ -158,9 +152,6 @@ export default function BookingForm({
   const [language, setLanguage] = useState<Language>(initialLanguage);
   const [step, setStep] = useState(1);
   const [serviceId, setServiceId] = useState(initialService);
-  const [colourAddOn, setColourAddOn] = useState(
-    initialColourAddOn && !initialService.includes("colour"),
-  );
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [name, setName] = useState("");
@@ -184,13 +175,10 @@ export default function BookingForm({
 
   const t = COPY[language];
   const service = SERVICES.find((item) => item.id === serviceId) ?? SERVICES[0];
-  const supportsColourAddOn = !service.id.includes("colour");
-  const addOn = supportsColourAddOn && colourAddOn;
-  const totalDuration = service.durationMinutes + (addOn ? COLOUR_ADD_ON_MINUTES : 0);
-  const totalPrice = service.priceCents + (addOn ? COLOUR_ADD_ON_CENTS : 0);
-  const serviceName =
-    serviceLabel(service.id, service.name, language) +
-    (addOn ? COLOUR_ADD_ON_SUFFIX[language] : "");
+  // Owner decision D06: price and duration are the Bookly service's, with no add-ons.
+  const totalDuration = service.durationMinutes;
+  const totalPrice = service.priceCents;
+  const serviceName = serviceLabel(service.id, service.name, language);
   const lastDate = addDays(today, bookingSettings.bookingWindowDays);
 
   const dateLabel = useMemo(() => {
@@ -210,14 +198,13 @@ export default function BookingForm({
   // Both lookups are `/api/availability`. The scoring behind a recommendation
   // lives on the server; the browser only asks again often enough to stay
   // honest — every minute, on focus, and after a booking attempt.
-  const addOnQuery = addOn ? "&addOn=colour" : "";
   const recommendationResource = useLiveResource<{ recommendations?: Recommendation[] }>(
-    `/api/availability?service=${encodeURIComponent(serviceId)}${addOnQuery}`,
+    `/api/availability?service=${encodeURIComponent(serviceId)}`,
     { intervalMs: CUSTOMER_REFRESH_MS, revision: scheduleRevision },
   );
   const timesResource = useLiveResource<{ times?: string[] }>(
     date
-      ? `/api/availability?date=${encodeURIComponent(date)}&service=${encodeURIComponent(serviceId)}${addOnQuery}`
+      ? `/api/availability?date=${encodeURIComponent(date)}&service=${encodeURIComponent(serviceId)}`
       : null,
     { intervalMs: CUSTOMER_REFRESH_MS, revision: scheduleRevision },
   );
@@ -280,7 +267,7 @@ export default function BookingForm({
             properties: {
               serviceId: {
                 type: "string",
-                enum: SERVICES.filter((item) => !item.isAddOn).map((item) => item.id),
+                enum: SERVICES.map((item) => item.id),
               },
               date: { type: "string", description: "Appointment date in YYYY-MM-DD format" },
               time: { type: "string", description: "Available start time in HH:MM format" },
@@ -288,7 +275,6 @@ export default function BookingForm({
               email: { type: "string" },
               phone: { type: "string" },
               notes: { type: "string" },
-              colourAddOn: { type: "boolean" },
               acceptedTerms: { type: "boolean", const: true },
             },
             required: ["serviceId", "date", "time", "name", "email", "phone", "acceptedTerms"],
@@ -361,7 +347,6 @@ export default function BookingForm({
 
   function pickService(id: string) {
     setServiceId(id);
-    if (id.includes("colour")) setColourAddOn(false);
     // The date survives a service change and is re-checked against the new
     // duration by the availability effect.
     setTime("");
@@ -390,7 +375,6 @@ export default function BookingForm({
         phone: phone.trim(),
         notes: notes.trim(),
         acceptedTerms,
-        colourAddOn: addOn,
         paymentMethod,
         reminderOptIn,
         marketingConsent,
@@ -586,7 +570,7 @@ export default function BookingForm({
           {step === 1 && (
             <>
               <div className="choice-list" role="radiogroup" aria-label={t.service}>
-                {SERVICES.filter((item) => !item.isAddOn).map((item) => (
+                {SERVICES.map((item) => (
                   <button
                     key={item.id}
                     type="button"
@@ -603,33 +587,6 @@ export default function BookingForm({
                   </button>
                 ))}
               </div>
-              {supportsColourAddOn && (
-                <button
-                  type="button"
-                  role="checkbox"
-                  aria-checked={colourAddOn}
-                  className="choice"
-                  style={{
-                    marginTop: 16,
-                    border: `1px solid ${colourAddOn ? "var(--ink)" : "var(--hairline)"}`,
-                    gridTemplateColumns: "24px 1fr auto",
-                  }}
-                  onClick={() => {
-                    setColourAddOn((value) => !value);
-                    setTime("");
-                    setUsedRecommendation(false);
-                  }}
-                >
-                  <span className="check-box">
-                    <Check strokeWidth={3} />
-                  </span>
-                  <span className="choice-name">
-                    <strong>{t.addOnTitle}</strong>
-                    <small>+{COLOUR_ADD_ON_MINUTES} min</small>
-                  </span>
-                  <b className="choice-price">+{formatPrice(COLOUR_ADD_ON_CENTS)}</b>
-                </button>
-              )}
             </>
           )}
 

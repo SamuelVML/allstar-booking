@@ -17,7 +17,7 @@ export async function GET(request: Request) {
     const blocks = await db.prepare(`SELECT id, start_time, end_time, reason FROM time_off
       WHERE date = ? AND removed_at IS NULL ORDER BY start_time`).bind(date).all();
     return Response.json({ date, email: user.email, bookings: bookings.results, blocks: blocks.results,
-      services: SERVICES.filter(service => !service.isAddOn) }, { headers });
+      services: SERVICES }, { headers });
   } catch {
     return Response.json({ error: "Unable to load bookings." }, { status: 503, headers });
   }

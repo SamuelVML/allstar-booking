@@ -274,8 +274,8 @@ assert.ok(!/CF_ACCESS|STRIPE_SECRET|ADMIN_EMAILS/.test(output.settings), 'no con
   );
   assert.equal(
     panel.recommendationUrl({ serviceId: 'haircut', date: DAY, colourAddOn: true }),
-    '/api/admin/recommendations?service=haircut&date=2026-09-22&addOn=colour',
-    'the add-on changes the duration the ranking is asked for',
+    '/api/admin/recommendations?service=haircut&date=2026-09-22',
+    'owner decision D06: there are no add-ons, so no add-on is ever requested',
   );
   assert.equal(panel.recommendationUrl({ serviceId: '', date: DAY }), null, 'no service, no request');
   assert.equal(panel.recommendationUrl({ serviceId: 'haircut', date: '' }), null, 'no date, no request');

@@ -174,7 +174,7 @@ export async function createWalkIn(database: D1Database, input: { id: string; da
   const stored = supplied ?? await readBookingSettings(database);
   const { settings } = stored;
   const service = getService(input.serviceId);
-  if (!service || service.isAddOn || !validManagementDate(input.date, settings.bookingWindowDays)) throw new BookingConflict(`Choose a valid service and date within ${settings.bookingWindowDays} days.`);
+  if (!service || !validManagementDate(input.date, settings.bookingWindowDays)) throw new BookingConflict(`Choose a valid service and date within ${settings.bookingWindowDays} days.`);
   const rows = await database.prepare("SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM bookly_occupied_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?")
     .bind(`${input.date}T00:00`, `${input.date}T23:59`).all<{ slot_start: string }>();
   // Staff can book from the current time, without the online one-hour lead time.

@@ -122,8 +122,14 @@ export async function POST(request: Request) {
     const notes = payload.notes?.trim() ?? "";
     const paymentMethod = payload.paymentMethod === "stripe" ? "stripe" : "cash";
 
-    if (!service || service.isAddOn || !dateIsValid(date) || !/^\d{2}:\d{2}$/.test(time)) {
+    if (!service || !dateIsValid(date) || !/^\d{2}:\d{2}$/.test(time)) {
       return Response.json({ error: "Choose a valid service, date and time." }, { status: 400 });
+    }
+    // Owner decision D06: every bookable service is one Bookly service, and
+    // Bookly has no add-ons, so a colour add-on request is refused rather
+    // than priced or silently dropped.
+    if (payload.colourAddOn === true) {
+      return Response.json({ error: "Choose a service that includes colour." }, { status: 400 });
     }
     const today = getTodayInEindhoven();
     if (date < today) {
@@ -201,10 +207,9 @@ export async function POST(request: Request) {
       );
     }
     await releaseExpiredPaymentReservations(database);
-    const colourAddOn = payload.colourAddOn === true && !service.id.includes("colour");
-    const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
-    const priceCents = service.priceCents + (colourAddOn ? 2250 : 0);
-    const serviceName = `${service.name}${colourAddOn ? " + colour" : ""}`;
+    const durationMinutes = service.durationMinutes;
+    const priceCents = service.priceCents;
+    const serviceName = service.name;
     const occupiedRows = await database
       .prepare(
         "SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM bookly_occupied_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
@@ -221,7 +226,7 @@ export async function POST(request: Request) {
       new Date(),
       settings,
     );
-    const checked = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, [{ date, times: availableTimes }]);
+    const checked = await filterBooklyTimes(service.id, durationMinutes + settings.handlingBufferMinutes, [{ date, times: availableTimes }]);
     if (!checked[0].times.includes(time)) {
       return Response.json(
         { error: "That time was just booked. Please choose another time." },
