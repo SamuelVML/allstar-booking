@@ -232,13 +232,27 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
     const result = z.object({ remoteId: z.string().regex(/^\d+$/).nullable(), version: z.string(), terminal: z.boolean().optional() })
       .parse(await booklyRequest("command", command));
     if (result.remoteId && !/^[a-f0-9]{64}$/.test(result.version)) throw new BooklyUnavailable("Invalid Bookly command receipt.");
-    const statements = [database.prepare("UPDATE bookly_commands SET status = 'done', error = NULL WHERE id = ?").bind(row.id)];
-    if (result.remoteId) statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) VALUES (?,?,?,?,?)
-      ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
-      .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind));
+    // Settled as delivered only while still pending. Staff may have discarded
+    // the command (resolve) while it was in flight.
+    const settled = "EXISTS (SELECT 1 FROM bookly_commands WHERE id=? AND status='done')";
+    const discarded = "EXISTS (SELECT 1 FROM bookly_commands WHERE id=? AND status='discarded')";
+    const statements = [database.prepare("UPDATE bookly_commands SET status = 'done', error = NULL WHERE id = ? AND status = 'pending'").bind(row.id)];
+    if (result.remoteId) {
+      statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) SELECT ?,?,?,?,? WHERE ${settled}
+        ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
+        .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind, row.id));
+      // A discarded command still changed Bookly. A new record is linked so the
+      // snapshot recognises it; the staff choice is reopened, with Bookly's new
+      // version, because it was made before this write.
+      statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) SELECT ?,?,?,?,? WHERE ${discarded}
+        ON CONFLICT(local_id) DO NOTHING`).bind(row.local_id, result.remoteId, result.version, row.digest, command.kind, row.id));
+      statements.push(database.prepare(`INSERT INTO bookly_conflicts(local_id,remote_id,remote_version,reason) SELECT ?,?,?,? WHERE ${discarded}
+        ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,reason=excluded.reason,resolution=NULL`)
+        .bind(row.local_id, result.remoteId, result.version, "A discarded change reached Bookly before it was discarded. Choose which version to keep.", row.id));
+    }
     // Bookly accepted the version staff chose to keep: the resolution is
     // complete and the record's email may follow.
-    statements.push(database.prepare("DELETE FROM bookly_conflicts WHERE local_id=? AND resolution='local'").bind(row.local_id));
+    statements.push(database.prepare(`DELETE FROM bookly_conflicts WHERE local_id=? AND resolution='local' AND ${settled}`).bind(row.local_id, row.id));
     if (lease) {
       const fence = leaseFence(database, lease);
       try { await database.batch([...fence.open, ...statements, fence.close]); }
@@ -269,9 +283,12 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
  *   reversal, unless anything changed since or the old time is taken;
  * - anything else is held for staff reconciliation (GET /api/admin/bookly),
  *   so it is not retried every run and blocks no unrelated command.
+ * A command staff discarded while it was in flight is left as it is.
  * With a lease (background sync) every booking write is fenced on it.
  */
 async function settleRejectedCommand(database: D1Database, row: CommandRow, command: Command, lease?: string) {
+  // Discarded by staff while in flight: Bookly changed nothing, nothing to settle.
+  if ((await database.prepare("SELECT status FROM bookly_commands WHERE id=?").bind(row.id).first<{ status: string }>())?.status !== "pending") return;
   const fence = lease ? leaseFence(database, lease) : null;
   const fenced = async (statements: D1PreparedStatement[]) => {
     try { await database.batch(fence ? [...fence.open, ...statements, fence.close] : statements); return true; }
@@ -334,9 +351,9 @@ type DrainBudget = { remaining: number };
  * and on failure a lookup, a batch and the error update. Settling a rejection
  * costs SETTLE_COST more, checked when it happens. */
 const COMMAND_COST = 5;
-/** Booking and change lookups, the restoring batch, the link lookup, the
- * holding batch and a lease check after each batch. */
-const SETTLE_COST = 7;
+/** Command status, booking and change lookups, the restoring batch, the link
+ * lookup, the holding batch and a lease check after each batch. */
+const SETTLE_COST = 8;
 /** Worst-case subrequests for one Stripe refund: refund-record read, upsert and
  * final write in D1, plus the Checkout Session lookup and refund in Stripe. */
 const REFUND_COST = 6;
@@ -470,15 +487,18 @@ async function adopt(database: D1Database, remote: Remote, link: Link | undefine
   const id = link?.local_id ?? remote.localId ?? `bookly-${remote.remoteId}`;
   // Preloaded once per run; the revision guard below rejects a row edited since.
   const current = preloaded.get(id) ?? null;
+  // Classified before any other conflict, so "keep Bookly" is refused whenever
+  // Bookly's version cannot be adopted, even if the booking also changed locally.
+  const serviceChanged = current && (stateOf(current).serviceId !== remote.serviceId || current.duration_minutes !== remote.durationMinutes);
   if (current && link && await digest(stateOf(current)) !== link.local_digest) {
-    if (remote.version !== link.remote_version) throw new BooklyConflict("Both calendars changed the same booking. Staff reconciliation is required.");
+    if (remote.version !== link.remote_version) {
+      throw new BooklyConflict(serviceChanged ? SERVICE_CHANGED : "Both calendars changed the same booking. Staff reconciliation is required.");
+    }
     return; // Local change is queued after this snapshot.
   }
   if (current && link?.remote_version === remote.version) return;
   if (remote.endDate !== remote.date || remote.durationMinutes > 480) throw new BooklyUnavailable("An overnight Bookly appointment needs staff review.");
-  if (current && (stateOf(current).serviceId !== remote.serviceId || current.duration_minutes !== remote.durationMinutes)) {
-    throw new BooklyConflict(SERVICE_CHANGED);
-  }
+  if (serviceChanged) throw new BooklyConflict(SERVICE_CHANGED);
   const status = current?.source !== "bookly" && remote.status === "payment_pending" && current?.status === "payment_pending"
     ? "payment_pending" : remote.status === "payment_pending" ? "confirmed" : remote.status;
   const cancelled = status === "cancelled";
@@ -678,7 +698,8 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
 /** Staff reconciliation of a held record (POST /api/admin/bookly, "resolve").
  * - "bookly": drop the local change; the next sync adopts Bookly's version
  *   (or, if Bookly deleted the booking, cancels and refunds it locally).
- *   Refused for a service or duration change, which would change the price.
+ *   Refused for a service or duration change, which would change the price,
+ *   and for a record Bookly never accepted.
  * - "local": drop the rejected command; the next sync writes the local version
  *   over Bookly's latest one (or recreates it), and Bookly still arbitrates the
  *   time slot.
@@ -717,6 +738,9 @@ export async function resolveBooklyConflict(database: D1Database, localId: strin
     if (conflict?.reason === SERVICE_CHANGED) {
       return { ok: false as const, error: "Bookly changed this booking's service or duration. Keep the local version, or cancel and rebook it." };
     }
+    // Never linked: Bookly has no version to adopt, and the next sync would
+    // export the local record again.
+    if (!link) return { ok: false as const, error: "Bookly has no version of this record. Keep the local version, or cancel it." };
     let state: State | null = null;
     if (localId.startsWith("block-")) {
       const block = await database.prepare("SELECT * FROM time_off WHERE id=?").bind(localId.slice(6)).first<TimeOffRow>();
@@ -725,9 +749,8 @@ export async function resolveBooklyConflict(database: D1Database, localId: strin
       const row = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(localId).first<Row>();
       if (row) state = stateOf(row);
     }
-    if (state && link) statements.push(database.prepare("UPDATE bookly_links SET remote_version='',local_digest=? WHERE local_id=?").bind(await digest(state), localId));
-    // Never linked: Bookly has no version to adopt.
-    statements.push(link ? mark : done);
+    if (state) statements.push(database.prepare("UPDATE bookly_links SET remote_version='',local_digest=? WHERE local_id=?").bind(await digest(state), localId));
+    statements.push(mark);
   }
   await database.batch(statements);
   return { ok: true as const };

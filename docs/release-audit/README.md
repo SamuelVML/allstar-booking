@@ -14,7 +14,7 @@ this work; `BOOKLY_SYNC_ENABLED=false` stays in force.
 | Combined head (this branch's base) | `f984288` = PR #9 head merged with PR #8 head (`ea4affa` changes documentation only; no conflicts) |
 | Regressions + migration 0010 | `5448624` — 18 checks fail, 5 controls pass ([log](evidence/release-audit-at-tests-commit.log)) |
 | Corrections | `40890f7` |
-| Re-review regressions / corrections | `ada6533` / see PR #10 |
+| Re-review regressions / corrections | `ada6533` / `b7cc10d`; second re-review `aedbb6d` / see PR #10 |
 | Migration order | `0008_bookly_bridge` → `0009_booking_obligations` → `0010_release_audit_remediation` |
 
 The combined head is used because finding 4 builds on PR #9's durable
@@ -109,6 +109,29 @@ clean ([log](evidence/validation-after-rereview.log)). Cron budget unchanged:
 5 runs, peak 32 behind a 200-command backlog. The preserved audit scripts are
 now excluded from lint (they added 25 unused-variable warnings) so they stay
 byte-identical to `SHA256SUMS`.
+
+## Codex re-review of `b7cc10d` (PR #10)
+
+Codex's review of the corrections raised three further findings, all in staff
+conflict resolution. Each was reproduced by a failing regression first
+(`aedbb6d`, [log](evidence/codex-rereview-2-at-tests-commit.log)), then
+corrected.
+
+| # | Finding | Correction | Regression |
+|---|---|---|---|
+| R9 (P2) | A service/duration change found together with a local edit was recorded as a generic conflict, so "keep Bookly" was accepted and the next snapshot reopened it | `adopt` classifies a service/duration change before any other conflict | `R9 "keep Bookly" is refused for a service change that coincides with a local edit` |
+| R10 (P2) | "Keep Bookly" for a record Bookly never accepted deleted the conflict; the next sync exported the record again and the conflict returned | Refused with 409: Bookly has no version to keep | `R10 "keep Bookly" is refused for a record Bookly never accepted` |
+| R11 (P2) | A command discarded by a resolve while in flight still settled as delivered: it overwrote the link and the "keep Bookly" marker never cleared | Receipts settle only while the command is `pending`. A discarded command that reached Bookly reopens the conflict with Bookly's new version (and links a new record so the snapshot recognises it). A discarded command Bookly rejected settles nothing | `R11 a command discarded while in flight does not settle as delivered…`, `R11 …then rejected by Bookly settles nothing` |
+
+The second R11 regression was added after `aedbb6d` for the rejection path,
+which the same race reaches; the log records it failing with only that guard
+removed. Settling a rejection now costs one more subrequest (`SETTLE_COST` 8).
+
+Validation after the corrections: `npm test` exit 0, 0 failures
+([log](evidence/npm-test-after-rereview-2.log)); `tsc` clean; lint 0 errors,
+3 pre-existing warnings; build succeeds; `drizzle-kit check`/`generate`
+clean ([log](evidence/validation-after-rereview-2.log)). Cron budget unchanged:
+5 runs, peak 32 behind a 200-command backlog. No schema or migration change.
 
 ## Not verified here
 

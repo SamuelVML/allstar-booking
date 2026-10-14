@@ -704,6 +704,23 @@ await check('R11 a command discarded while in flight does not settle as delivere
   assert.equal((await booklyStatus()).body.conflicts.length, 0, 'the resolution completes');
 });
 
+await check('R11 a command discarded while in flight and then rejected by Bookly settles nothing', async () => {
+  markFresh(); const date = openDay();
+  const held = await heldConflict(date);
+  await syncRun();
+  assert.equal((await booklyAction({ action: 'resolve', localId: held.id, keep: 'local' })).status, 200);
+  beforeCommand = async () => {
+    assert.equal((await booklyAction({ action: 'resolve', localId: held.id, keep: 'bookly' })).status, 200);
+    remoteRow({ ...remoteOf(held.id), notes: 'edited in Bookly again' }); // the in-flight write is rejected on version
+  };
+  await syncRun();
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='held'").get(held.id).n, 0, 'nothing is held again');
+  assert.equal(db.prepare('SELECT resolution FROM bookly_conflicts WHERE local_id=?').get(held.id).resolution, 'bookly', 'the staff choice is not reopened');
+  assert.equal((await syncRun()).ok, true);
+  assert.equal(appointment(held.id).notes, 'edited in Bookly again', 'the staff choice stands');
+  assert.equal((await booklyStatus()).body.conflicts.length, 0);
+});
+
 console.log(results.join('\n'));
 if (failures) { console.error(`${failures} release-audit regression(s) failed`); process.exit(1); }
 console.log('PASS: release audit findings 1-8 (deletion race, rejected reschedule, conflict isolation, refund recovery, lease fencing, stored notification payloads, provider key window, checkout recovery)');
