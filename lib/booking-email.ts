@@ -186,17 +186,23 @@ function escapeHtml(value: string) {
     .replaceAll("'", "&#039;");
 }
 
-export async function sendBookingChangeNotification(
+/** One provider request: its idempotency key and the exact JSON body. */
+export type PreparedEmail = { idempotencyKey: string; body: Record<string, unknown> };
+
+/** Build the change notification once. The result is stored before its first
+ * delivery (lib/booking-obligations.ts) and every retry sends it verbatim:
+ * Resend rejects a reused idempotency key with a different payload. Returns
+ * null when email is not configured. */
+export function prepareBookingChangeNotification(
   booking: import("@/lib/booking-management").ManagedBooking,
   action: "cancel" | "reschedule",
   changeId: string,
   target?: { date: string; time: string },
   refundStatus?: "not_needed" | "refunded" | "pending",
-) {
-  const apiKey = env.RESEND_API_KEY?.trim();
+): PreparedEmail[] | null {
   const from = env.BOOKING_EMAIL_FROM?.trim();
   const businessName = env.BOOKING_BUSINESS_NAME?.trim();
-  if (!apiKey || !from || !businessName) return false;
+  if (!env.RESEND_API_KEY?.trim() || !from || !businessName) return null;
   const subject = `Booking ${action === "cancel" ? "cancelled" : "rescheduled"} · ${booking.reference}`;
   const text = [
     `${subject} — ${businessName}`,
@@ -212,18 +218,40 @@ export async function sendBookingChangeNotification(
     `Reference: ${booking.reference}`,
   ].join("\n");
   const recipients = [booking.customer_email, env.BOOKING_ADMIN_EMAIL?.trim()].filter((value): value is string => Boolean(value));
-  const outcomes = await Promise.allSettled(recipients.map(async (to, index) => {
+  return recipients.map((to, index) => ({
+    idempotencyKey: `booking-change/${changeId}/${index}`,
+    body: { from, to: [to], subject, text,
+      ...(env.BOOKING_EMAIL_REPLY_TO?.trim() ? { reply_to: env.BOOKING_EMAIL_REPLY_TO.trim() } : {}),
+      html: `<html><body style="font-family:Arial,sans-serif;padding:24px;line-height:1.6"><h1>${escapeHtml(subject)}</h1><p>${escapeHtml(text).replaceAll("\n", "<br>")}</p></body></html>`,
+    },
+  }));
+}
+
+/** Send prepared requests exactly as stored. True only when every recipient
+ * was accepted. */
+export async function deliverPreparedEmails(messages: PreparedEmail[]) {
+  const apiKey = env.RESEND_API_KEY?.trim();
+  if (!apiKey) return false;
+  const outcomes = await Promise.allSettled(messages.map(async (message) => {
     const response = await sendResendRequest({
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `booking-change/${changeId}/${index}` },
-      body: JSON.stringify({ from, to: [to], subject, text,
-        ...(env.BOOKING_EMAIL_REPLY_TO?.trim() ? { reply_to: env.BOOKING_EMAIL_REPLY_TO.trim() } : {}),
-        html: `<html><body style="font-family:Arial,sans-serif;padding:24px;line-height:1.6"><h1>${escapeHtml(subject)}</h1><p>${escapeHtml(text).replaceAll("\n", "<br>")}</p></body></html>`,
-      }),
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": message.idempotencyKey },
+      body: JSON.stringify(message.body),
     });
     if (!response.ok) throw new Error("Booking change email rejected");
   }));
   const sent = outcomes.every((result) => result.status === "fulfilled");
   if (!sent) console.error("Some booking change notifications failed");
   return sent;
+}
+
+export async function sendBookingChangeNotification(
+  booking: import("@/lib/booking-management").ManagedBooking,
+  action: "cancel" | "reschedule",
+  changeId: string,
+  target?: { date: string; time: string },
+  refundStatus?: "not_needed" | "refunded" | "pending",
+) {
+  const messages = prepareBookingChangeNotification(booking, action, changeId, target, refundStatus);
+  return messages ? deliverPreparedEmails(messages) : false;
 }
