@@ -77,6 +77,49 @@ bookable. Five keys are reused with Bookly's meaning (`haircut`,
 `student-haircut`, `kids-haircut`, `line-up`, `haircut-colour`); their old rows
 keep their old price and duration.
 
+A checkout interrupted before D06 (a payment hold with a retired key or the
+colour add-on) resumes on retry at its stored service and price; a new request
+for a retired key or the add-on is still refused with 400 (R18).
+
+## Pre-D06 future bookings at Bookly activation
+
+The bridge refuses a booking it cannot express in Bookly with HTTP 422
+(`service_map`: the website key has no Bookly service; `duration_map`: the
+stored duration differs from the Bookly service; `input`: invalid record).
+422 is permanent, never an outage: the Worker does not retry it.
+
+- Background synchronization holds that one record for staff (command
+  `held`, `error='mapping'`, conflict reason "Service not mapped in Bookly" or
+  "Duration differs from Bookly"). The booking is never cancelled, moved or
+  refunded, keeps its slots and stored price, and the rest of the run
+  continues: other records are delivered, the snapshot is applied and
+  occupancy stays fresh. These holds do not count toward the held-record
+  limit that stops synchronization (`MAX_HELD_CONFLICTS`).
+- A hold created by the same request (a new website booking, a walk-in, or a
+  resumed unpaid payment hold) is released instead, before any Checkout
+  Session exists (a resumed hold's session is expired). The customer is told
+  the booking was not made and nothing was charged. A confirmed booking is
+  never released on a retry.
+- Website availability for an unmapped key is refused by the plugin before
+  any hold is created.
+
+Before enabling `BOOKLY_SYNC_ENABLED` (staff, read-only check):
+
+1. Open Backstage → Settings → Needs attention ("Bookings Bookly cannot take"),
+   or `GET /api/admin/bookly?report=activation` (works with the bridge off).
+   It lists every future active booking the first run would export that the
+   bridge would refuse: retired keys (`beard-trim-shape`, `haircut-beard`,
+   `haircut-beard-colour`), `+colour` add-on bookings, and reused keys whose
+   duration changed (an old 30-minute `student-haircut` against Bookly's 40).
+2. For each one, either change it to a current service in Backstage (the
+   price stays as booked) or cancel it, or enter it in Bookly by hand and then
+   cancel it on the website. Never delete rows.
+3. Enable sync only when the list is empty, or accept that each remaining row
+   is held on the first run. A held row is closed by changing or cancelling the
+   booking and then choosing "keep the website version" (POST
+   `/api/admin/bookly` `resolve`, `keep: "local"`). A cancelled or past booking
+   then closes without writing anything to Bookly.
+
 ## Open items public data cannot answer (owner / WordPress admin)
 
 1. **Padding.** `padding_left` / `padding_right` per service are not in the
@@ -86,7 +129,7 @@ keep their old price and duration.
 2. **Staff-specific duration overrides.** The public response shows staff
    prices (all equal to the service price) but not staff-specific durations.
    The plugin refuses a command whose duration differs from the Bookly
-   service's own duration (`duration_map`, 503).
+   service's own duration (`duration_map`, 422, held for staff).
 3. **10-minute handling buffer.** The website adds 10 minutes after every
    service (Backstage setting). Bookly's durations may already include
    turnaround. Decide whether the buffer stays, especially for the 15-minute
@@ -94,13 +137,11 @@ keep their old price and duration.
 4. **`min_time_prior_booking`.** Every public service carries
    `[2026, 9, 14]`. Its meaning in Bookly 28.6 is not documented in the
    response. The website keeps its own 60-minute online lead time.
-5. **Pre-D06 future bookings at sync activation.** Rows with a legacy key or a
-   `+colour` name have no Bookly service, and the plugin refuses them
-   (`service_map`). Rows with a reused key whose duration changed (old
-   `student-haircut` 30 min against Bookly's 40) are refused (`duration_map`).
-   Decide how these are entered in Bookly (by staff, before activation) and
-   confirm how the Worker settles a 503 refusal (held for staff, not retried
-   forever) before enabling sync.
+5. **Pre-D06 future bookings at sync activation.** Resolved in the bridge
+   (R17): refused rows are held for staff, never retried, and listed before
+   activation (see "Pre-D06 future bookings at Bookly activation"). Still an
+   owner decision: whether staff move them to a current service, cancel them,
+   or enter them in Bookly by hand.
 6. **Hidden or private services.** The public form lists services visible to
    customers. Confirm in WordPress Tools → All Star Bookly Bridge that no
    other service should be sold online.

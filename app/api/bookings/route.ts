@@ -1,4 +1,4 @@
-import { assertBooklyFresh, pushBooklyChanges, filterBooklyTimes, booklyEnabled, BooklyConflict, BooklyUnavailable } from "@/lib/bookly";
+import { assertBooklyFresh, pushBooklyChanges, filterBooklyTimes, booklyEnabled, BooklyConflict, BooklyRejected, BooklyUnavailable } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   addMinutes,
@@ -83,6 +83,10 @@ async function storeCheckout(database: D1Database, id: string, session: { id: st
   return (await getStripeClient().checkout.sessions.retrieve(current.stripe_checkout_session_id)).url ?? null;
 }
 
+/** Bookly refused the service permanently; the request's hold was released
+ * before any Checkout Session existed (or its session was expired). */
+const SERVICE_REFUSED = "This service cannot be booked online right now, so your booking was not made and nothing was charged. Choose another service or contact the shop.";
+
 /** Stripe requires a Checkout Session to stay open at least 30 minutes. */
 const CHECKOUT_MIN_OPEN_MS = 30 * 60_000 + 15_000;
 
@@ -129,14 +133,11 @@ export async function POST(request: Request) {
     const notes = payload.notes?.trim() ?? "";
     const paymentMethod = payload.paymentMethod === "stripe" ? "stripe" : "cash";
 
-    if (!service || !dateIsValid(date) || !/^\d{2}:\d{2}$/.test(time)) {
+    // The service is checked against the catalogue only for a new booking
+    // (below): a retried request resumes its stored hold, which may carry a
+    // service or add-on sold before owner decision D06.
+    if (!(payload.serviceId ?? "") || !dateIsValid(date) || !/^\d{2}:\d{2}$/.test(time)) {
       return Response.json({ error: "Choose a valid service, date and time." }, { status: 400 });
-    }
-    // Owner decision D06: every bookable service is one Bookly service, and
-    // Bookly has no add-ons, so a colour add-on request is refused rather
-    // than priced or silently dropped.
-    if (payload.colourAddOn === true) {
-      return Response.json({ error: "Choose a service that includes colour." }, { status: 400 });
     }
     const today = getTodayInEindhoven();
     if (date < today) {
@@ -177,8 +178,24 @@ export async function POST(request: Request) {
         reserved = true;
         // Deliver a command left pending by an interrupted attempt. A Bookly
         // rejection cancels the unpaid hold and surfaces as BooklyConflict.
-        await pushBooklyChanges(database, [previous.id]);
-        if (previous.service_id !== service.id || previous.customer_email !== email || previous.appointment_date !== date || previous.start_time !== time) {
+        // An unpaid payment hold Bookly refuses permanently (a service sold
+        // before D06) is released too, and its Checkout Session, if any, is
+        // expired so it can no longer be paid. A confirmed booking is never
+        // released: Bookly's refusal holds it for staff and it stands.
+        try { await pushBooklyChanges(database, [previous.id], { releaseRejectedHold: previous.status === "payment_pending" }); }
+        catch (error) {
+          if (!(error instanceof BooklyRejected)) throw error;
+          const after = await database.prepare("SELECT status FROM appointments WHERE id = ?").bind(previous.id).first<{ status: string }>();
+          if (after?.status === "payment_pending") {
+            return Response.json({ error: "This request is saved but still needs staff review. Do not create a second booking." }, { status: 409 });
+          }
+          if (after?.status === "confirmed") previous.status = "confirmed";
+          else if (previous.stripe_checkout_session_id) {
+            try { await getStripeClient().checkout.sessions.expire(previous.stripe_checkout_session_id); } catch { /* A late payment is refunded automatically. */ }
+          }
+          if (after?.status !== "confirmed") return Response.json({ error: SERVICE_REFUSED }, { status: 503 });
+        }
+        if (previous.service_id !== (payload.serviceId ?? "") || previous.customer_email !== email || previous.appointment_date !== date || previous.start_time !== time) {
           return Response.json({ error: "This booking request was already used. Refresh before starting a different booking." }, { status: 409 });
         }
         if (previous.status === "payment_pending" && previous.payment_method === "stripe") {
@@ -203,6 +220,15 @@ export async function POST(request: Request) {
           paymentMethod: previous.payment_status === "paid" ? "Paid online" : "Pay at the shop", loyalty: { currentPoints: retryCustomer?.loyalty_points ?? 0, rewardAt: retrySettings.loyaltyRewardPoints, pendingPoint: 1 },
         } });
       }
+    }
+    // Owner decision D06: every bookable service is one Bookly service, and
+    // Bookly has no add-ons, so a colour add-on request is refused rather
+    // than priced or silently dropped. Retired keys are not bookable.
+    if (!service) {
+      return Response.json({ error: "Choose a valid service, date and time." }, { status: 400 });
+    }
+    if (payload.colourAddOn === true) {
+      return Response.json({ error: "Choose a service that includes colour." }, { status: 400 });
     }
     const { settings } = await readBookingSettings(database);
     const maximumDate = new Date(`${today}T12:00:00Z`);
@@ -318,8 +344,9 @@ export async function POST(request: Request) {
     await database.batch(statements);
     reserved = true;
     // Write the hold to Bookly before checkout or confirmation. Bookly rejects a
-    // slot taken there since the last snapshot; the hold is then cancelled.
-    await pushBooklyChanges(database, [appointmentId]);
+    // slot taken there since the last snapshot; the hold is then cancelled, as
+    // it is when Bookly refuses the service permanently (BooklyRejected).
+    await pushBooklyChanges(database, [appointmentId], { releaseRejectedHold: true });
 
     if (paymentMethod === "stripe") {
       let session;
@@ -405,6 +432,7 @@ export async function POST(request: Request) {
       { status: 201 },
     );
   } catch (error) {
+    if (error instanceof BooklyRejected) return Response.json({ error: SERVICE_REFUSED }, { status: 503 });
     if (error instanceof BooklyConflict) return Response.json({ error: "That time was just booked. Please choose another time." }, { status: 409 });
     if (error instanceof BooklyUnavailable) {
       return Response.json({ error: reserved

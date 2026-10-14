@@ -167,3 +167,28 @@ PHP plugin tests (PHP not installed), including the R16 stale-link
 replacement. Backstage now lists held conflicts and `reconcile` emails
 (`/admin/attention`); its confirmations use the browser dialog rather than the
 Backstage sheet, and it has not been checked in a real browser.
+
+## Integration findings R17–R18 (`release/cutover-rc` 71e49cf)
+
+Found while integrating the Codex re-review corrections (R12–R16) with owner
+decision D06. Each was reproduced first (`59929d9`,
+[log](../release-cutover/evidence/mapping-rejections-at-tests-commit.log)),
+then corrected. Regressions: `tests/mapping-rejections.mjs` (part of
+`npm test`) and the 422 checks in `tests/bookly-plugin.php`
+(`npm run test:plugin`). Its Bookly double reads each refusal's HTTP status
+from the plugin source, so the checks exercise what the plugin returns.
+
+| # | Finding | Correction | Regression |
+|---|---|---|---|
+| R17 (P1) | The plugin answered a permanent refusal (`service_map`, `duration_map`, invalid record) with 503 (400 for input). The Worker treated it as an outage and every drain rethrew it, so one future booking on a retired key or a changed duration aborted every sync run: occupancy went stale, online booking closed, and the command was retried every minute | Plugin: permanent refusals are 422 (`refuse`). Worker: 422 is `BooklyRejected`. Background sync holds that record (`error='mapping'`, staff-readable reason), never cancels, moves or refunds it, and continues; these holds are excluded from `MAX_HELD_CONFLICTS`. A hold the same request created (website booking, walk-in, resumed unpaid hold) is released before any Checkout Session; a confirmed booking is never released on retry. "Keep website version" on a never-linked record that is no longer exportable (cancelled, past) closes it. Read-only activation report: `GET /api/admin/bookly?report=activation` and Backstage → Needs attention | `R17 …held for staff and does not stop synchronization`, `R17 …duration that differs…never cancelled…`, `R17 many unmappable…held-record limit`, `R17 …listed for staff…`, `R17 the activation report…`, `R17 a new website booking…refused before any hold or charge`, `R17 a hold Bookly refuses at the command…released`, two walk-in checks, `R17 staff can close a held legacy booking…`; PHP: `permanent 422 mapping refusals` |
+| R18 (P1) | A checkout interrupted before D06 (retired key or colour add-on) could not resume: the catalogue check (400) ran before the resume path | A request whose `requestId` matches an existing hold resumes it with the stored service, price and duration; a new request with a retired key or the add-on is still 400 | `R18 …retired service resumes at its stored price`, `R18 …colour add-on resumes…`, `R18 a new request…still refused` (control), `R18 a retried confirmed booking…never cancelled`, `R18 with the bridge on…released without charging` |
+
+Mutation checks (each reverted): releasing confirmed holds on resume, cancelling
+refused holds in background sync, counting mapping holds toward the limit,
+dropping the 422 classification, and leaving the keep-local marker each make
+at least one regression fail.
+
+Validation: [log](../release-cutover/evidence/mapping-rejections-validation.log).
+No schema or migration change. Not verified here: the real plugin against
+WordPress/Bookly on staging.
+

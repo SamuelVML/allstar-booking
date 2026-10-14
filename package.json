@@ -21,7 +21,7 @@
     "test:catalogue": "node scripts/bookly-service-map.mjs --check && node tests/catalogue-consistency.mjs",
     "test:plugin": "php tests/bookly-plugin.php && ALLSTAR_TEST_SERVICE_OVERRIDE=match php tests/bookly-plugin.php && ALLSTAR_TEST_SERVICE_OVERRIDE=mismatch php tests/bookly-plugin.php",
     "test:ui": "node tests/ui/run.mjs",
-    "test:bookly": "node tests/bookly.mjs && node tests/bookly-hardening.mjs && node tests/bookly-review-fixes.mjs && node tests/bookly-budget.mjs && node tests/stripe-test-mode.mjs && node tests/vacation-cancellation.mjs && node tests/release-audit.mjs && node tests/migration-0010.mjs && npm run test:catalogue"
+    "test:bookly": "node tests/bookly.mjs && node tests/bookly-hardening.mjs && node tests/bookly-review-fixes.mjs && node tests/bookly-budget.mjs && node tests/stripe-test-mode.mjs && node tests/vacation-cancellation.mjs && node tests/release-audit.mjs && node tests/migration-0010.mjs && node tests/mapping-rejections.mjs && npm run test:catalogue"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

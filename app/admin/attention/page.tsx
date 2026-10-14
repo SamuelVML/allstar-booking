@@ -2,7 +2,7 @@ import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { getD1 } from "@/db";
 import { getStaffUser } from "@/lib/staff-auth";
-import { booklyEnabled } from "@/lib/bookly";
+import { booklyActivationReport, booklyEnabled } from "@/lib/bookly";
 import { formatPrice } from "@/lib/booking";
 import { MAX_REFUND_ATTEMPTS } from "@/lib/refunds";
 import { attentionItems } from "@/lib/staff-attention";
@@ -17,8 +17,10 @@ export default async function AttentionPage() {
   const user = await getStaffUser(await headers());
   if (!user) notFound();
 
-  const { notifications, refunds, calendar } = await attentionItems(getD1(), MAX_REFUND_ATTEMPTS, !booklyEnabled());
-  const empty = notifications.length + refunds.length + calendar.conflicts.length === 0;
+  const database = getD1();
+  const { notifications, refunds, calendar } = await attentionItems(database, MAX_REFUND_ATTEMPTS, !booklyEnabled());
+  const unmappable = await booklyActivationReport(database);
+  const empty = notifications.length + refunds.length + calendar.conflicts.length + unmappable.length === 0;
 
   return (
     <>
@@ -91,6 +93,27 @@ export default async function AttentionPage() {
               )}
             </span>
             {!item.resolution && booklyEnabled() && <AttentionActions kind="calendar" id={item.local_id} />}
+          </div>
+        ))}
+
+        {unmappable.length > 0 && <span className="eyebrow eyebrow-s">Bookings Bookly cannot take</span>}
+        {unmappable.map((item) => (
+          <div className="setting-row" key={item.id}>
+            <span>
+              <strong>
+                {item.reference} · {item.serviceName} · {formatPrice(item.priceCents)}
+              </strong>
+              <span className="sub">
+                {item.date} {item.time} ·{" "}
+                {item.issue === "service_not_mapped"
+                  ? "This service is no longer sold and has no Bookly service."
+                  : `${item.durationMinutes} min here, ${item.booklyDurationMinutes} min in Bookly.`}{" "}
+                Change it to a current service or cancel it before Bookly synchronization is turned on. The price stays as booked.
+              </span>
+            </span>
+            <a className="btn btn-outline btn-xs" href={`/admin/bookings?date=${item.date}`}>
+              Open booking
+            </a>
           </div>
         ))}
       </div>
