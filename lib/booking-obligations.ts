@@ -11,9 +11,9 @@
 import { refundCancelledBooking, type RefundOutcome } from "@/lib/refunds";
 import { deliverPreparedEmails, prepareBookingChangeNotification, type PreparedEmail } from "@/lib/booking-email";
 import { addMinutes } from "@/lib/booking";
-import { booklyEnabled } from "@/lib/bookly";
 import type { ManagedBooking } from "@/lib/booking-management";
 import { meteredDatabase, type SubrequestBudget } from "@/lib/subrequest-budget";
+import { RESEND_PREFIX } from "@/lib/staff-attention";
 
 type ObligationRow = { id: string; appointment_id: string; change_id: string; kind: "refund" | "notify"; status: string; attempts: number; outcome: string | null;
   payload: string | null; first_attempt_at: number | null };
@@ -159,8 +159,11 @@ async function notify(database: D1Database, claim: Claim, booking: ManagedBookin
     // A move Bookly rejected was restored (or replaced by a later change):
     // nothing was confirmed, so nothing is sent.
     if (booking.status !== "confirmed" || booking.appointment_date !== change.new_date || booking.start_time !== change.new_time) return "superseded";
-    if (booklyEnabled() && state.calendar_pending) {
+    if (state.calendar_pending) {
       // Remote acceptance not established yet; give the claim back unchanged.
+      // Independent of the current bridge setting: a move queued or held while
+      // the bridge was on is still missing from Bookly after it is turned off.
+      // With the bridge off from the start no command exists, so nothing waits.
       await database.prepare("UPDATE booking_obligations SET attempts = attempts - 1, next_attempt_at = ? WHERE id = ? AND next_attempt_at = ? AND attempts = ?")
         .bind(Date.now() + CALENDAR_WAIT_MS, row.id, claim.until, claim.attempts).run();
       return "waiting";
@@ -182,6 +185,8 @@ async function notify(database: D1Database, claim: Claim, booking: ManagedBookin
     messages = prepareBookingChangeNotification(booking, "cancel", row.change_id, undefined, refundStatus);
   }
   if (!messages) return "failed"; // email not configured; retried with backoff
+  // A staff-requested resend (lib/staff-attention.ts) gets keys of its own.
+  if (row.outcome?.startsWith(RESEND_PREFIX)) messages = messages.map(message => ({ ...message, idempotencyKey: `${message.idempotencyKey}/${row.outcome}` }));
   const stored = await database.prepare(`UPDATE booking_obligations SET payload = ?, first_attempt_at = ?
     WHERE id = ? AND status = 'pending' AND next_attempt_at = ? AND attempts = ? AND payload IS NULL`)
     .bind(JSON.stringify(messages), Date.now(), row.id, claim.until, claim.attempts).run();

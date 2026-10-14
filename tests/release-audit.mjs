@@ -737,6 +737,9 @@ await check('R11 a command discarded while in flight and then rejected by Bookly
 
 
 /* ------------------------------------------- Codex re-review of f5413b4 */
+const attention = () => load('app/api/admin/attention/route.ts');
+const attentionStatus = () => attention().GET(new Request('https://allstar.test/api/admin/attention')).then(json);
+const attentionAction = body => attention().POST(new Request('https://allstar.test/api/admin/attention', { method: 'POST', body: JSON.stringify(body) })).then(json);
 await check('R12 a concurrent-request idempotency conflict (409) keeps the hold; the retry returns the session the other request created', async () => {
   markFresh(); const body = stripeRequest();
   // The concurrent original request completes Checkout creation under the same key.
@@ -768,6 +771,8 @@ await check('R13 a queued reschedule email stays blocked after the bridge is dis
   for (let i = 0; i < 3; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
   assert.equal(deliveriesFor(moved.reference).length, 0, 'no email for a time Bookly does not have');
   assert.equal(db.prepare("SELECT status FROM booking_obligations WHERE kind='notify'").get().status, 'pending', 'the email still waits');
+  const listed = await attentionStatus();
+  assert.ok(listed.body.calendar.conflicts.some(item => item.local_id === moved.id), 'staff see the move that never reached Bookly');
 });
 async function reconciledNotification() {
   env.BOOKLY_SYNC_ENABLED = 'false'; const date = openDay();
@@ -781,9 +786,6 @@ async function reconciledNotification() {
   assert.equal(row.status, 'reconcile');
   return { unpaid, row };
 }
-const attention = () => load('app/api/admin/attention/route.ts');
-const attentionStatus = () => attention().GET(new Request('https://allstar.test/api/admin/attention')).then(json);
-const attentionAction = body => attention().POST(new Request('https://allstar.test/api/admin/attention', { method: 'POST', body: JSON.stringify(body) })).then(json);
 await check('R14 staff see a notification moved to reconciliation, with its instruction', async () => {
   const { row } = await reconciledNotification();
   const listed = await attentionStatus();
@@ -815,6 +817,8 @@ await check('R14 staff resend a reconcile notification once, under a new provide
 });
 await check('R14 held Bookly records are listed for staff even while synchronization is disabled', async () => {
   markFresh(); const held = await heldConflict(openDay());
+  await syncRun();
+  assert.ok(db.prepare("SELECT 1 FROM bookly_commands WHERE local_id=? AND status='held' UNION SELECT 1 FROM bookly_conflicts WHERE local_id=?").get(held.id, held.id), 'held');
   env.BOOKLY_SYNC_ENABLED = 'false';
   const listed = await attentionStatus();
   assert.equal(listed.status, 200);

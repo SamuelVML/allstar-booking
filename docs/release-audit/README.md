@@ -133,8 +133,37 @@ Validation after the corrections: `npm test` exit 0, 0 failures
 clean ([log](evidence/validation-after-rereview-2.log)). Cron budget unchanged:
 5 runs, peak 32 behind a 200-command backlog. No schema or migration change.
 
+## Codex re-review of `f5413b4` (PR #10) — R12–R16
+
+Codex's review of `f5413b4` raised five further findings. Each was reproduced
+by a failing regression first (`2e31ee8`,
+[log](evidence/codex-rereview-3-at-tests-commit.log): 9 checks fail, the R16
+control passes), then corrected on branch `rc-codex-findings` (from
+`release/cutover-rc`).
+
+| # | Finding | Correction | Regression (`tests/release-audit.mjs`) |
+|---|---|---|---|
+| R12 (P1) | A Stripe idempotency conflict (409, another request with the same key still executing) or lock timeout (429) was treated as a definitive rejection: the hold was released while the concurrent request could still create a payable session | 409, 429, `StripeIdempotencyError`/`idempotency_error` and `lock_timeout` are uncertain outcomes: the hold is kept (it expires like any unpaid hold) and a retry recovers the session under the same key | `R12 a concurrent-request idempotency conflict (409)…`, `R12 a Stripe lock timeout (429)…` |
+| R13 (P2) | A reschedule email queued while the bridge was on was sent once the bridge was turned off, while Bookly still had the old time | The email waits on pending/held commands and conflicts (including `resolution` markers) whatever the current `BOOKLY_SYNC_ENABLED`; with the bridge off from the start no command exists, so nothing waits. While sync is off, such pending commands are listed for staff | `R13 a queued reschedule email stays blocked after the bridge is disabled…` |
+| R14 (P2) | Notifications moved to `reconcile` were invisible to staff and could never be resolved; held Bookly records were hidden while sync was off | New staff queue: `GET /api/admin/attention` (Access + staff allowlist) lists `reconcile`/`failed` customer emails with their booking and instruction, refunds out of automatic retries, held commands and conflicts (and pending commands while sync is off). `POST` `resolve_notification` with `delivered`, `dismiss` (closed, nothing sent) or `resend` (rebuilt from the current booking under new provider keys `…/resend-<ms>`), accepted once and audited on the obligation (`outcome`, `last_error`: staff identity and time). Backstage: `/admin/attention`, linked from Settings ("Needs attention") | `R14 staff see a notification…`, `R14 …as delivered…`, `R14 …resend…once, under a new provider key`, `R14 held Bookly records are listed…while synchronization is disabled`; `tests/backstage-render.mjs` (page renders the queue, refuses unauthenticated visitors) |
+| R15 (P2) | A refund worker failing after another worker recorded the refund overwrote `succeeded` with `failed` | The failure write and the initial upsert both require `status != 'succeeded'`; a late failing worker reports the recorded `refunded` outcome | `R15 a refund worker that fails after another recorded the refund…` |
+| R16 (P2) | "Keep local" for a booking deleted in Bookly never recreated it: the plugin's `allstar_bridge_links` row still pointed at the deleted appointment and rejected the creation | The Worker marks the recreation command `replaceDeletedLink: true` (unlinked record with a staff `resolution='local'`); the plugin removes its stale link inside the command transaction only when that flag is set, the expected version is empty and the linked Bookly appointment or participant no longer exists. A live link is never replaced. The extra read is folded into the existing export query (budget unchanged) | `R16 "keep local" for a booking deleted in Bookly recreates it…`, `R16 a recreation never replaces a link whose Bookly appointment still exists` (control) |
+
+The Bookly test double now keeps plugin-side links after a Bookly deletion,
+as WordPress does; every earlier check still passes against it.
+
+Validation ([log](evidence/codex-rereview-3-validation.log)): `npm test`
+exit 0, 112 PASS lines, 0 FAIL ([log](evidence/codex-rereview-3-npm-test.log));
+`tsc --noEmit` exit 0; lint exit 0 (0 errors, the 3 pre-existing warnings);
+build exit 0; `drizzle-kit check` clean and `generate` reports no schema
+changes. No migration. PHP is not installed here, so the plugin change is
+covered only by the Worker-side double; `tests/bookly-plugin.php` was not run
+and the plugin change must be exercised on the WordPress staging clone.
+
 ## Not verified here
 
 Real WordPress/Bookly, Stripe, Resend, MySQL locking and a deployed Worker;
-PHP plugin tests (PHP not installed). Backstage has no UI yet for held
-conflicts or `reconcile` emails (API only).
+PHP plugin tests (PHP not installed), including the R16 stale-link
+replacement. Backstage now lists held conflicts and `reconcile` emails
+(`/admin/attention`); its confirmations use the browser dialog rather than the
+Backstage sheet, and it has not been checked in a real browser.

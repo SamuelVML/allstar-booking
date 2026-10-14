@@ -48,7 +48,8 @@ export async function refundCancelledBooking(
       `INSERT INTO payment_refunds (id, appointment_id, amount_cents, status, requested_by)
        VALUES (?, ?, ?, 'pending', ?)
        ON CONFLICT(appointment_id) DO UPDATE SET
-         status = 'pending', error = NULL, updated_at = CURRENT_TIMESTAMP${options.automatic ? "" : ", attempts = 0"}`,
+         status = 'pending', error = NULL, updated_at = CURRENT_TIMESTAMP${options.automatic ? "" : ", attempts = 0"}
+       WHERE payment_refunds.status != 'succeeded'`,
     )
     .bind(refundRecordId, booking.id, booking.price_cents, actorId)
     .run();
@@ -84,14 +85,17 @@ export async function refundCancelledBooking(
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Refund failed";
     // Count the attempt and schedule the next automatic one (retryDueRefunds).
-    await database
+    // Never over a success another worker (staff retry, Cron sweep or
+    // obligation) recorded meanwhile for the same idempotent refund.
+    const failed = await database
       .prepare(
         `UPDATE payment_refunds SET status = 'failed', error = ?, attempts = attempts + 1,
            next_attempt_at = ? + MIN(1 << MIN(attempts, 6), 64) * 60000, updated_at = CURRENT_TIMESTAMP
-         WHERE appointment_id = ?`,
+         WHERE appointment_id = ? AND status != 'succeeded'`,
       )
       .bind(message, Date.now(), booking.id)
       .run();
+    if (failed.meta.changes === 0) return "refunded";
     console.error("Automatic Stripe refund failed", booking.reference, error);
     return "pending";
   }

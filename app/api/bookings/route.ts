@@ -52,9 +52,16 @@ async function checkoutFor(booking: HeldBooking, origin: string) {
 
 /** Stripe answered with a client error (4xx): no session was created. Any
  * other failure (no response, timeout, Stripe server error) may have created
- * one, which a retry recovers under the same idempotency key. */
+ * one, which a retry recovers under the same idempotency key. So may an
+ * idempotency or concurrency conflict: Stripe answers 409 while another
+ * request with the same key is still executing, and 429 (including
+ * lock_timeout) when the request should be retried; that other request can
+ * still create the session, so the hold is kept for it. */
 function checkoutOutcomeUncertain(error: unknown) {
-  const status = (error as { statusCode?: unknown } | null)?.statusCode;
+  const failure = error as { statusCode?: unknown; type?: unknown; rawType?: unknown; code?: unknown } | null;
+  const status = failure?.statusCode;
+  if (status === 409 || status === 429) return true;
+  if (failure?.type === "StripeIdempotencyError" || failure?.rawType === "idempotency_error" || failure?.code === "lock_timeout") return true;
   return !(typeof status === "number" && status >= 400 && status < 500);
 }
 
