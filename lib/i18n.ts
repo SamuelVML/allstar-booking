@@ -23,7 +23,6 @@ export const COPY = {
 
     servicesTitle: "Services & prices",
     servicesHint: "Tap to book",
-    addOnNote: "Colour add-on available with most haircuts (+30 min · +€22,50).",
 
     howTitle: "How it works",
     howSteps: [
@@ -87,7 +86,6 @@ export const COPY = {
       "",
     ],
 
-    addOnTitle: "Add hair colour",
     today: "Today",
     closed: "Closed",
     openingOn: "Open",
@@ -189,7 +187,6 @@ export const COPY = {
 
     servicesTitle: "Diensten & prijzen",
     servicesHint: "Tik om te boeken",
-    addOnNote: "Kleur-add-on mogelijk bij de meeste knipbeurten (+30 min · +€22,50).",
 
     howTitle: "Zo werkt het",
     howSteps: [
@@ -253,7 +250,6 @@ export const COPY = {
       "",
     ],
 
-    addOnTitle: "Haar kleuren toevoegen",
     today: "Vandaag",
     closed: "Gesloten",
     openingOn: "Open",
@@ -350,14 +346,19 @@ export const COPY = {
 /** Dutch service names, keyed by the catalogue ids in `lib/booking.ts`. */
 const SERVICE_NAMES_NL: Record<string, string> = {
   haircut: "Knipbeurt",
-  "student-haircut": "Studentenknipbeurt",
-  "kids-haircut": "Kinderknipbeurt",
-  "line-up": "Line-up",
-  "beard-trim-shape": "Baard trimmen & vormen",
-  "haircut-beard": "Knipbeurt + baard",
-  "haircut-colour": "Knipbeurt + kleur",
-  "haircut-beard-colour": "Knipbeurt + baard + kleur",
-  "colour-add-on": "Kleur-add-on",
+  "line-up": "Contouren (line-up)",
+  "beard-shape": "Baard vormen (model)",
+  "line-up-beard-shave": "Contouren & baard scheren",
+  "line-up-beard-model": "Contouren & baard model",
+  "line-up-beard-model-colour": "Contouren, baard model & haar kleuren",
+  "haircut-colour": "Knipbeurt & haar kleuren",
+  "haircut-beard-trim": "Knipbeurt & baard trimmen of scheren",
+  "haircut-beard-shape": "Knipbeurt & baard vormen",
+  "haircut-beard-shape-colour": "Knipbeurt, baard vormen & haar kleuren",
+  "kids-haircut": "Kinderknipbeurt (4–15 jaar)",
+  "toddler-haircut": "Peuterknipbeurt (0–3 jaar)",
+  "kids-haircut-x2": "Twee kinderknipbeurten (4–15 jaar)",
+  "student-haircut": "Studentenknipbeurt (16+)",
 };
 
 /**
@@ -369,10 +370,6 @@ export function serviceLabel(id: string, fallback: string, language: Language) {
   return fallback;
 }
 
-export const COLOUR_ADD_ON_SUFFIX: Record<Language, string> = {
-  en: " + colour",
-  nl: " + kleur",
-};
 
 export function locale(language: Language) {
   return language === "nl" ? "nl-NL" : "en-GB";

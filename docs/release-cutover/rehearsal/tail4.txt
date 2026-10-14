@@ -1,0 +1,8 @@
+
+ ⛅️ wrangler 4.92.0 (update available 4.151.0)
+──────────────────────────────────────────────
+Successfully created tail, expires at 2026-10-14T19:08:17Z
+Connected to allstar-booking-rehearsal, waiting for logs...
+"* * * * *" @ 10/14/2026, 3:15:48 PM - Ok
+"* * * * *" @ 10/14/2026, 3:16:48 PM - Ok
+"* * * * *" @ 10/14/2026, 3:17:48 PM - Ok

@@ -1,9 +1,11 @@
+import { assertBooklyFresh, BooklyConflict, BooklyRejected, BooklyUnavailable, booklyEnabled, pushAfterCommit, pushBooklyChanges } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
 import { BookingConflict } from "@/lib/booking-management";
 import {
   blockFullDays,
+  blockFullDaysCancelling,
   blockTime,
   createWalkIn,
   recordPayment,
@@ -12,9 +14,8 @@ import {
 } from "@/lib/backstage";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
 import { readBookingSettings } from "@/lib/booking-settings";
-import { changeBooking } from "@/lib/booking-management";
 import { refundCancelledBooking } from "@/lib/refunds";
-import { sendBookingChangeNotification } from "@/lib/booking-email";
+import { obligationSummary, processBookingObligations } from "@/lib/booking-obligations";
 import type { ManagedBooking } from "@/lib/booking-management";
 
 const schema = z.discriminatedUnion("action", [
@@ -40,8 +41,12 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Check the form fields and try again." }, { status: 400 });
   try {
     const database = getD1();
-    const stored = await readBookingSettings(database);
     const input = parsed.data;
+    // Only operations that read calendar availability need fresh Bookly
+    // occupancy. Unblocking, shop payments and refund retries stay available
+    // during a Bookly outage; their calendar updates replay in the background.
+    if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await assertBooklyFresh(database);
+    const stored = await readBookingSettings(database);
     if (input.action === "block" || input.action === "block_range" || input.action === "walk_in") await releaseExpiredPaymentReservations(database);
     if (input.action === "block") await blockTime(database, input, user.id, stored);
     if (input.action === "block_range") {
@@ -65,6 +70,8 @@ export async function POST(request: Request) {
         );
       }
 
+      if (conflicts.some(booking => booking.source === "bookly")) throw new BookingConflict("Reschedule or cancel the affected Bookly appointments in Bookly first.");
+
       const pendingReservation = await database
         .prepare(
           `SELECT reference FROM appointments
@@ -79,30 +86,27 @@ export async function POST(request: Request) {
         );
       }
 
-      // Reserve the vacation before any irreversible cancellation, refund or
-      // email side effect. Existing time off or an invalid range therefore
-      // fails without changing a customer booking.
-      const blockedDays = await blockFullDays(database, input, user.id, stored);
-
+      // No conflicts: the ordinary full-day block. With conflicts: one
+      // transaction cancels them, releases their slots, records their refund
+      // and email obligations and blocks the days, or changes nothing.
+      let blockedDays: number;
       let refundsPending = 0;
       let notificationsSent = true;
-      for (const booking of conflicts) {
-        const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
-        const refundStatus = await refundCancelledBooking(database, booking, user.id);
-        if (refundStatus === "pending") refundsPending += 1;
-        if (booking.customer_email) {
-          notificationsSent =
-            (await sendBookingChangeNotification(
-              booking,
-              "cancel",
-              change.changeId,
-              undefined,
-              refundStatus,
-            )) && notificationsSent;
-        }
+      if (conflicts.length === 0) {
+        blockedDays = await blockFullDays(database, input, user.id, stored);
+      } else {
+        const committed = await blockFullDaysCancelling(database, input, conflicts, user.id, stored);
+        blockedDays = committed.blockedDays;
+        // Committed: process the obligations now; anything unfinished is
+        // retried by the Cron Trigger and reported here as pending.
+        try { await processBookingObligations(database, { changeIds: committed.changeIds, limit: committed.changeIds.length * 2 }); }
+        catch { console.error("Vacation obligations deferred to background retry"); }
+        ({ refundsPending, notificationsSent } = await obligationSummary(database, committed.changeIds));
       }
+      const calendar = await pushAfterCommit(database, null);
       return Response.json({
         saved: true,
+        calendar,
         blockedDays,
         cancelledBookings: conflicts.length,
         refundsPending,
@@ -110,7 +114,22 @@ export async function POST(request: Request) {
       });
     }
     if (input.action === "unblock") await removeBlock(database, input.id, user.id);
-    if (input.action === "walk_in") await createWalkIn(database, input, user.id, stored);
+    if (input.action === "walk_in") {
+      await createWalkIn(database, input, user.id, stored);
+      // Success only once Bookly has accepted the walk-in. A Bookly booking that
+      // took the slot after the live check makes the bridge release the walk-in.
+      // A service Bookly refuses permanently releases the walk-in as well.
+      try { await pushBooklyChanges(database, [input.id], { releaseRejectedHold: true }); }
+      catch (error) {
+        if (error instanceof BooklyRejected) throw new BookingConflict("Bookly cannot take this service as it is set up. The walk-in was not added.");
+        if (error instanceof BooklyConflict) throw new BookingConflict("That time was just booked in Bookly. The walk-in was not added.");
+        if (error instanceof BooklyUnavailable) {
+          return Response.json({ error: "Bookly has not confirmed this walk-in yet. The time stays reserved and syncs automatically; refresh before adding it again." }, { status: 503 });
+        }
+        throw error;
+      }
+      return Response.json({ saved: true, calendar: booklyEnabled() ? "synced" : "disabled" });
+    }
     if (input.action === "payment") await recordPayment(database, input, user.id);
     if (input.action === "retry_refund") {
       const booking = await database
@@ -131,9 +150,12 @@ export async function POST(request: Request) {
       const refundStatus = await refundCancelledBooking(database, booking, user.id);
       return Response.json({ saved: true, refundStatus });
     }
-    return Response.json({ saved: true });
+    const calendar = await pushAfterCommit(database, null);
+    return Response.json({ saved: true, calendar });
   } catch (error) {
     if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
+    // Refused by Bookly before anything was saved (availability check).
+    if (error instanceof BooklyRejected) return Response.json({ error: "Bookly cannot take this service as it is set up. Nothing was saved." }, { status: 409 });
     console.error("Backstage operation failed");
     return Response.json({ error: "Unable to save. Refresh to check whether it was saved before retrying." }, { status: 503 });
   }

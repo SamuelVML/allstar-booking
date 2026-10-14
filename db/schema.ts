@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, uniqueIndex, text } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, sqliteTable, uniqueIndex, text } from "drizzle-orm/sqlite-core";
 
 export const customerAccounts = sqliteTable(
   "customer_accounts",
@@ -24,6 +24,7 @@ export const appointments = sqliteTable(
   {
     id: text("id").primaryKey(),
     reference: text("reference").notNull().unique(),
+    bookingRequestId: text("booking_request_id"),
     revision: integer("revision").notNull().default(0),
     source: text("source").notNull().default("online"),
     createdBy: text("created_by"),
@@ -53,6 +54,8 @@ export const appointments = sqliteTable(
       table.appointmentDate,
       table.status,
     ),
+    // Idempotent website booking retries. See 0008_bookly_bridge.sql.
+    uniqueIndex("appointments_request_id").on(table.bookingRequestId).where(sql`${table.bookingRequestId} IS NOT NULL`),
   ],
 );
 
@@ -150,8 +153,72 @@ export const paymentRefunds = sqliteTable(
     requestedBy: text("requested_by").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Automatic retry bookkeeping (lib/refunds.ts). See 0010_release_audit_remediation.sql.
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at").notNull().default(0),
   },
   (table) => [
     uniqueIndex("payment_refunds_appointment_id_unique").on(table.appointmentId),
   ],
 );
+
+// Calendar integration custody and retry records. See 0008_bookly_bridge.sql.
+export const booklyLinks = sqliteTable("bookly_links", {
+  localId: text("local_id").primaryKey(), remoteId: text("remote_id").notNull().unique(),
+  remoteVersion: text("remote_version").notNull(), localDigest: text("local_digest").notNull(),
+  kind: text("kind").notNull().default("appointment"),
+});
+export const booklyCommands = sqliteTable("bookly_commands", {
+  id: text("id").primaryKey(), localId: text("local_id").notNull(), payload: text("payload").notNull(),
+  digest: text("digest").notNull(), status: text("status").notNull().default("pending"), error: text("error"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, table => [uniqueIndex("bookly_commands_pending").on(table.localId).where(sql`${table.status} = 'pending'`)]);
+export const booklySyncState = sqliteTable("bookly_sync_state", {
+  id: integer("id").primaryKey(), lease: text("lease"), leaseUntil: integer("lease_until").notNull().default(0),
+  lastSuccess: text("last_success"), error: text("error"),
+}, table => [check("bookly_sync_state_singleton", sql`${table.id} = 1`)]);
+export const booklyOccupiedSlots = sqliteTable("bookly_occupied_slots", {
+  slotStart: text("slot_start").notNull(), appointmentId: text("appointment_id").notNull(),
+}, table => [primaryKey({ columns: [table.slotStart, table.appointmentId] })]);
+export const booklyCallbackNonces = sqliteTable("bookly_callback_nonces", {
+  nonce: text("nonce").primaryKey(), expires: integer("expires").notNull(),
+});
+export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
+  id: text("id").primaryKey(), valid: integer("valid").notNull(),
+}, table => [check("bookly_revision_guards_valid", sql`${table.valid} = 1`)]);
+// Records held for staff reconciliation instead of blocking unrelated sync
+// work (lib/bookly.ts). See 0010_release_audit_remediation.sql.
+// A resolved row stays until the chosen version reaches both calendars, so the
+// record's customer email stays blocked meanwhile.
+export const booklyConflicts = sqliteTable("bookly_conflicts", {
+  localId: text("local_id").primaryKey(), remoteId: text("remote_id"), remoteVersion: text("remote_version"),
+  reason: text("reason").notNull(), detectedAt: text("detected_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  resolution: text("resolution", { enum: ["bookly", "local"] }),
+}, table => [check("bookly_conflicts_resolution", sql`${table.resolution} IS NULL OR ${table.resolution} IN ('bookly','local')`)]);
+
+// Durable side effects of a committed booking change (refund, customer email).
+// Written in the same transaction as the change; processed afterwards by
+// lib/booking-obligations.ts. See 0009_booking_obligations.sql.
+export const bookingObligations = sqliteTable("booking_obligations", {
+  id: text("id").primaryKey(),
+  appointmentId: text("appointment_id").notNull().references(() => appointments.id),
+  changeId: text("change_id").notNull().references(() => bookingChanges.id),
+  kind: text("kind", { enum: ["refund", "notify"] }).notNull(),
+  status: text("status", { enum: ["pending", "done", "failed", "reconcile"] }).notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: integer("next_attempt_at").notNull().default(0),
+  outcome: text("outcome"),
+  lastError: text("last_error"),
+  // The exact provider request, stored before its first delivery and reused
+  // verbatim by every retry, and when that first delivery started. See
+  // 0010_release_audit_remediation.sql.
+  payload: text("payload"),
+  firstAttemptAt: integer("first_attempt_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, table => [
+  uniqueIndex("booking_obligations_change_kind").on(table.changeId, table.kind),
+  index("booking_obligations_due").on(table.status, table.nextAttemptAt),
+  check("booking_obligations_kind", sql`${table.kind} IN ('refund','notify')`),
+  check("booking_obligations_status", sql`${table.status} IN ('pending','done','failed','reconcile')`),
+]);

@@ -5,17 +5,7 @@ import Link from "next/link";
 import { COPY, type Language } from "@/lib/i18n";
 import { ArrowLeft } from "@/lib/icons";
 import SuccessView, { type Booking } from "../success-view";
-
-type PaidBooking = {
-  reference: string;
-  serviceName: string;
-  date: string;
-  time: string;
-  endTime: string;
-  priceCents: number;
-  paymentStatus: string;
-  durationMinutes?: number;
-};
+import { sessionOutcome, type SessionResult } from "@/lib/payment-outcome";
 
 const PHONE = "+31686357350";
 
@@ -34,6 +24,7 @@ export default function PaymentSuccess({
 }) {
   const [booking, setBooking] = useState<Booking | null>(null);
   const [error, setError] = useState("");
+  const [cancelled, setCancelled] = useState<{ refunded: boolean; message: string } | null>(null);
   const t = COPY[language];
 
   useEffect(() => {
@@ -43,11 +34,13 @@ export default function PaymentSuccess({
       signal: controller.signal,
     })
       .then(async (response) => {
-        const result = (await response.json()) as { booking?: PaidBooking; error?: string };
-        if (!response.ok || !result.booking) {
-          throw new Error(result.error ?? "Confirmation failed.");
+        const outcome = sessionOutcome(response.ok, (await response.json()) as SessionResult);
+        if (outcome.kind === "cancelled") {
+          setCancelled({ refunded: outcome.refunded, message: outcome.message });
+          return;
         }
-        const paid = result.booking;
+        if (outcome.kind === "error") throw new Error(outcome.message);
+        const paid = outcome.booking;
         setBooking({
           reference: paid.reference,
           serviceName: paid.serviceName,
@@ -84,7 +77,29 @@ export default function PaymentSuccess({
       </header>
       <div className="flow-body">
         <div className="flow-body-inner" aria-live="polite">
-          {!error ? (
+          {cancelled ? (
+            <div className="alert" role="alert">
+              <strong>{language === "nl" ? "Deze boeking is geannuleerd" : "This booking was cancelled"}</strong>
+              <p>
+                {language === "nl"
+                  ? cancelled.refunded
+                    ? "De tijd werd vrijgegeven voordat je betaling binnenkwam, dus er is geen afspraak gereserveerd. Je betaling is terugbetaald."
+                    : "De tijd werd vrijgegeven voordat je betaling binnenkwam, dus er is geen afspraak gereserveerd. Je terugbetaling wordt verwerkt; neem contact op met All Star als die niet aankomt."
+                  : cancelled.message}
+              </p>
+              <div className="alert-actions">
+                <a
+                  className="btn btn-primary btn-s"
+                  href={`https://wa.me/${PHONE.replace("+", "")}`}
+                >
+                  WhatsApp
+                </a>
+                <Link className="btn btn-on-dark btn-s" href="/book">
+                  {language === "nl" ? "Kies een nieuwe tijd" : "Choose a new time"}
+                </Link>
+              </div>
+            </div>
+          ) : !error ? (
             <div className="confirming">
               <span className="spinner spinner-l" aria-hidden="true" />
               <strong>{t.confirming}</strong>

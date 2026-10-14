@@ -75,6 +75,16 @@ const mocks = {
 
 /* ------------------------------------------- canonical Backstage entrypoint */
 
+const entryRedirects = await load('next.config.ts').default.redirects();
+for (const source of ['/admin', '/admin/']) {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(entryRedirects.find(rule => rule.source === source))),
+    { source, destination: '/admin/bookings', permanent: false },
+    `${source} redirects before the protected layout runs`,
+  );
+}
+assert.equal(entryRedirects.length, 2, 'no redirects bypass other staff routes');
+
 assert.throws(
   () => load('app/admin/page.tsx').default(),
   error => error?.location === '/admin/bookings',
@@ -98,6 +108,7 @@ function load(relative) {
 
   const resolve = name => {
     if (mocks[name]) return mocks[name];
+    if (name === "cloudflare:workers") return { env: {} };
     if (name === '@/lib/booking') {
       return {
         ...load('lib/booking.ts'),
@@ -247,6 +258,28 @@ assert.match(output.settings, /Opening hours/);
 assert.match(output.settings, /Handling buffer/);
 assert.match(output.settings, new RegExp(STAFF.email.replace('.', '\\.')), 'the signed-in staff email is shown');
 assert.ok(!/CF_ACCESS|STRIPE_SECRET|ADMIN_EMAILS/.test(output.settings), 'no configuration is leaked to the page');
+assert.match(output.settings, /Needs attention/);
+
+// Short when empty, so rendered without the size check.
+output.attentionEmpty = renderToStaticMarkup(await load('app/admin/attention/page.tsx').default());
+assert.match(output.attentionEmpty, /Nothing is waiting for a decision/);
+{
+  // A cancellation email whose delivery is unknown, and a record held for Bookly.
+  const id = db.prepare('SELECT id, reference FROM appointments LIMIT 1').get();
+  db.prepare(`INSERT INTO booking_changes (id, appointment_id, revision, action, actor_id, previous_date, previous_time)
+    VALUES ('render-change', ?, 9001, 'cancel', 'render', '2026-09-22', '10:00')`).run(id.id);
+  db.prepare(`INSERT INTO booking_obligations (id, appointment_id, change_id, kind, status, attempts, last_error)
+    VALUES ('notify/render-change', ?, 'render-change', 'notify', 'reconcile', 3, 'Delivery outcome unknown.')`).run(id.id);
+  db.prepare(`INSERT INTO bookly_conflicts (local_id, reason) VALUES (?, 'Both calendars changed.')`).run(id.id);
+  output.attention = await render('app/admin/attention/page.tsx', {});
+  assert.match(output.attention, new RegExp(id.reference), 'the email is listed with its booking');
+  assert.match(output.attention, /Ask the customer whether they received it/);
+  assert.match(output.attention, /Received/); assert.match(output.attention, /Resend/); assert.match(output.attention, /Dismiss/);
+  assert.match(output.attention, /Both calendars changed\./, 'the held calendar record is listed');
+  db.prepare(`DELETE FROM bookly_conflicts`).run();
+  db.prepare(`DELETE FROM booking_obligations WHERE id = 'notify/render-change'`).run();
+  db.prepare(`DELETE FROM booking_changes WHERE id = 'render-change'`).run();
+}
 
 /* ------------------------------------- the Samaritan panel's wiring (PR #2) */
 
@@ -263,8 +296,8 @@ assert.ok(!/CF_ACCESS|STRIPE_SECRET|ADMIN_EMAILS/.test(output.settings), 'no con
   );
   assert.equal(
     panel.recommendationUrl({ serviceId: 'haircut', date: DAY, colourAddOn: true }),
-    '/api/admin/recommendations?service=haircut&date=2026-09-22&addOn=colour',
-    'the add-on changes the duration the ranking is asked for',
+    '/api/admin/recommendations?service=haircut&date=2026-09-22',
+    'owner decision D06: there are no add-ons, so no add-on is ever requested',
   );
   assert.equal(panel.recommendationUrl({ serviceId: '', date: DAY }), null, 'no service, no request');
   assert.equal(panel.recommendationUrl({ serviceId: 'haircut', date: '' }), null, 'no date, no request');
@@ -296,6 +329,7 @@ for (const page of [
   'app/admin/customers/page.tsx',
   'app/admin/revenue/page.tsx',
   'app/admin/settings/page.tsx',
+  'app/admin/attention/page.tsx',
 ]) {
   await assert.rejects(
     () => render(page, {}),
@@ -324,3 +358,12 @@ if (process.env.BACKSTAGE_HTML_OUT) {
 }
 
 console.log('PASS: all five Backstage screens render, Samaritan asks the protected endpoint on the 30s cadence, and every page refuses unauthenticated visitors');
+
+// Booking entry uses native navigation so a failed client-side route transition
+// cannot consume the click. This is a render contract, not a browser click proof.
+const home = renderToStaticMarkup(React.createElement(load('app/site-home.tsx').default, {
+  initialLanguage: 'en', todayWeekday: 2, bookingSettings: load('lib/booking.ts').DEFAULT_BOOKING_SETTINGS,
+}));
+assert.match(home, /<a class="btn btn-primary btn-block" href="\/book"/);
+assert.match(home, /href="\/book\?service=haircut"/);
+console.log('PASS: homepage booking CTA and service rows render native booking links');

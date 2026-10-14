@@ -1,0 +1,480 @@
+{
+ "fetched": "2026-10-14",
+ "source": "https://all-star-barbershop.com/wp-admin/admin-ajax.php action=bookly_render_service form 6acf6efd1ffb0",
+ "services": {
+  "1": {
+   "id": 1,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut ",
+   "duration": "30 min",
+   "price": 33.5,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 1,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "2": {
+   "id": 2,
+   "img": "",
+   "category_id": -1,
+   "name": "Line up (Shape up) Contouren ",
+   "duration": "15 min",
+   "price": 17,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 2,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "4": {
+   "id": 4,
+   "img": "",
+   "category_id": -1,
+   "name": "Beard Shape (model) ",
+   "duration": "15 min",
+   "price": 20,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 4,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "13": {
+   "id": 13,
+   "img": "",
+   "category_id": -1,
+   "name": "Line up & Beard shave",
+   "duration": "15 min",
+   "price": 22.5,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 13,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "14": {
+   "id": 14,
+   "img": "",
+   "category_id": -1,
+   "name": "Line up & Beard model",
+   "duration": "30 min",
+   "price": 28,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 14,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "16": {
+   "id": 16,
+   "img": "",
+   "category_id": -1,
+   "name": "Line up, beard model & hair color ",
+   "duration": "30 min",
+   "price": 44.5,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 16,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "17": {
+   "id": 17,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut & hair color ",
+   "duration": "1 h",
+   "price": 50,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 17,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "18": {
+   "id": 18,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut & Beard trim or shave ",
+   "duration": "40 min",
+   "price": 38,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 18,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "19": {
+   "id": 19,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut & Beard shape",
+   "duration": "40 min",
+   "price": 40,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 19,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "20": {
+   "id": 20,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut, Beard shape & Hair color ",
+   "duration": "1 h",
+   "price": 55,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 20,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "21": {
+   "id": 21,
+   "img": "",
+   "category_id": -1,
+   "name": "Kids (4-15 years)",
+   "duration": "30 min",
+   "price": 27.5,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 21,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "22": {
+   "id": 22,
+   "img": "",
+   "category_id": -1,
+   "name": "Enfants (0 - 3 years)",
+   "duration": "30 min",
+   "price": 25,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 22,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "23": {
+   "id": 23,
+   "img": "",
+   "category_id": -1,
+   "name": "Kids x2 (4-15 years)",
+   "duration": "50 min",
+   "price": 55,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 23,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  },
+  "26": {
+   "id": 26,
+   "img": "",
+   "category_id": -1,
+   "name": "Hair cut Student 16 years +",
+   "duration": "40 min",
+   "price": 33.5,
+   "min_capacity": 1,
+   "max_capacity": 1,
+   "has_extras": 0,
+   "service_info": "",
+   "info": "",
+   "type": "simple",
+   "pos": 24,
+   "recurrence_enabled": 1,
+   "recurrence_frequencies": "daily,weekly,biweekly,monthly",
+   "min_time_prior_booking": [
+    2026,
+    9,
+    14
+   ],
+   "tags": []
+  }
+ },
+ "staff": {
+  "1": {
+   "id": 1,
+   "name": "Amaury Reyes",
+   "img": "https://all-star-barbershop.com/wp-content/uploads/2021/10/Screenshot-2021-10-29-at-11.59.56-PM.png",
+   "services": {
+    "1": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€33.50",
+       "flat_price": 33.5
+      }
+     ]
+    },
+    "2": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€17.00",
+       "flat_price": 17
+      }
+     ]
+    },
+    "4": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€20.00",
+       "flat_price": 20
+      }
+     ]
+    },
+    "13": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€22.50",
+       "flat_price": 22.5
+      }
+     ]
+    },
+    "18": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€38.00",
+       "flat_price": 38
+      }
+     ]
+    },
+    "19": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€40.00",
+       "flat_price": 40
+      }
+     ]
+    },
+    "20": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€55.00",
+       "flat_price": 55
+      }
+     ]
+    },
+    "21": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€27.50",
+       "flat_price": 27.5
+      }
+     ]
+    },
+    "22": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€25.00",
+       "flat_price": 25
+      }
+     ]
+    },
+    "23": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€55.00",
+       "flat_price": 55
+      }
+     ]
+    },
+    "14": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€28.00",
+       "flat_price": 28
+      }
+     ]
+    },
+    "16": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€44.50",
+       "flat_price": 44.5
+      }
+     ]
+    },
+    "17": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€50.00",
+       "flat_price": 50
+      }
+     ]
+    },
+    "26": {
+     "locations": [
+      {
+       "min_capacity": 1,
+       "max_capacity": 1,
+       "price": "€33.50",
+       "flat_price": 33.5
+      }
+     ]
+    }
+   },
+   "pos": 0,
+   "staff_info": "",
+   "info": ""
+  }
+ }
+}

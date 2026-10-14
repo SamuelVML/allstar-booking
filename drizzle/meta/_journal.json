@@ -57,6 +57,27 @@
       "when": 1790084840278,
       "tag": "0007_schema_checkpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791842751560,
+      "tag": "0008_bookly_bridge",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791900585712,
+      "tag": "0009_booking_obligations",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1791928035839,
+      "tag": "0010_release_audit_remediation",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,12 @@
+npm test exit 0
+PASS lines: 112; FAIL lines: 0
+tsc --noEmit exit 0
+lint exit 0
+✖ 3 problems (0 errors, 3 warnings)
+build exit 0
+Everything's fine 🐶🔥
+drizzle-kit check exit 
+No schema changes, nothing to migrate 😴
+drizzle-kit generate exit 
+php: php not found
+not installed; tests/bookly-plugin.php not run

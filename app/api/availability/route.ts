@@ -1,3 +1,4 @@
+import { assertBooklyFresh, filterBooklyTimes, booklyEnabled } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   buildAvailableTimes,
@@ -24,11 +25,10 @@ export async function GET(request: Request) {
     const date = url.searchParams.get("date") ?? "";
     const serviceId = url.searchParams.get("service") ?? "";
     const service = getService(serviceId);
-    const colourAddOn =
-      url.searchParams.get("addOn") === "colour" &&
-      !service?.id.includes("colour");
+    // Owner decision D06: no add-on combinations; each service is one Bookly service.
+    const addOnRequested = url.searchParams.has("addOn");
 
-    if (!service || service.isAddOn || (date && !dateIsValid(date))) {
+    if (!service || addOnRequested || (date && !dateIsValid(date))) {
       return Response.json({ error: "Choose a valid service and date." }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
@@ -42,11 +42,13 @@ export async function GET(request: Request) {
     }
 
     await releaseExpiredPaymentReservations(database);
+    // Background sync keeps Bookly occupancy current; stale occupancy fails closed.
+    await assertBooklyFresh(database);
     const rangeStart = date || today;
     const rangeEnd = date || maximumDate;
     const rows = await database
       .prepare(
-        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'appointment' AS kind FROM bookly_occupied_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${rangeStart}T00:00`, `${rangeEnd}T23:59`)
       .all<{ slot_start: string; kind: "appointment" | "time_off" }>();
@@ -54,11 +56,11 @@ export async function GET(request: Request) {
     const appointmentSlots = new Set(
       rows.results.filter((row) => row.kind === "appointment").map((row) => row.slot_start),
     );
-    const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
+    const durationMinutes = service.durationMinutes;
 
     if (!date) {
       const availableDays = [];
-      for (let offset = 0; offset <= settings.bookingWindowDays; offset += 1) {
+      for (let offset = 0; offset <= (booklyEnabled() ? Math.min(14, settings.bookingWindowDays) : settings.bookingWindowDays); offset += 1) {
         const candidateDate = addDays(today, offset);
         const times = buildAvailableTimes(
           candidateDate,
@@ -71,8 +73,9 @@ export async function GET(request: Request) {
         );
         if (times.length > 0) availableDays.push({ date: candidateDate, times });
       }
+      const filteredDays = await filterBooklyTimes(service.id, durationMinutes + settings.handlingBufferMinutes, availableDays);
       const recommendations = rankRecommendations({
-        availableDays,
+        availableDays: filteredDays,
         occupiedSlots: appointmentSlots,
         durationMinutes,
         serviceName: service.name,
@@ -92,18 +95,12 @@ export async function GET(request: Request) {
       }, { headers: NO_STORE_HEADERS });
     }
 
+    const localTimes = buildAvailableTimes(date, durationMinutes, occupied, settings.handlingBufferMinutes, settings.onlineLeadMinutes, now, settings);
+    const filtered = await filterBooklyTimes(service.id, durationMinutes + settings.handlingBufferMinutes, [{ date, times: localTimes }]);
     return Response.json({
       date,
       service: service.id,
-      times: buildAvailableTimes(
-        date,
-        durationMinutes,
-        occupied,
-        settings.handlingBufferMinutes,
-        settings.onlineLeadMinutes,
-        now,
-        settings,
-      ),
+      times: filtered[0].times,
       generatedAt: now.toISOString(),
       validUntil: new Date(now.getTime() + 60_000).toISOString(),
     }, { headers: NO_STORE_HEADERS });

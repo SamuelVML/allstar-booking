@@ -1,0 +1,60 @@
+(node:13873) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS F1 a staff edit racing a Bookly deletion keeps the booking and its slots; the time cannot be double-booked
+PASS F1 an unraced Bookly deletion still cancels, releases the slots and refunds once
+PASS F2 a reschedule Bookly rejects is reported as rejected, not notified, and restored to its original time
+PASS F2 a reschedule queued while Bookly is unreachable is notified only after Bookly accepts it
+PASS F2 a queued reschedule Bookly rejects later is restored and never notified
+PASS F2 a reschedule Bookly accepts is confirmed and notified once (unchanged)
+PASS F3 one conflicted command is held; snapshots, exports and refunds continue
+PASS F3 later changes to a held booking wait behind its conflict (ordering preserved)
+PASS F3 conflict isolation is bounded: too many held records stop synchronization
+PASS F3 staff resolve a held conflict by keeping the Bookly version
+PASS F3 staff resolve a held conflict by keeping the local version
+PASS F4 a failed refund for a Bookly cancellation is retried automatically with backoff, once
+PASS F4 a failed late-payment refund is retried by the Cron task even with Bookly disabled
+PASS F4 a refund that keeps failing stops after its last automatic attempt and stays retryable by staff
+PASS F5 a worker that lost its lease commits no cancellation and no refund
+PASS F5 a worker that lost its lease cannot cancel a booking deleted in Bookly
+PASS F6 a notification retry sends the stored payload under the same key
+PASS F7 an uncertain delivery older than the provider key window goes to reconciliation, not a resend
+PASS F7 an uncertain delivery inside the window is retried under the same key and completes once
+PASS F8 retrying an interrupted pre-checkout request resumes payment without a second booking
+PASS F8 concurrent retries of one request create one Checkout Session
+PASS F8 an interruption after Checkout creation recovers the same session on retry
+PASS F8 a cash booking retry still confirms once (unchanged)
+FAIL R2 refund retries are not starved by a persistent notification backlog: the due refund was attempted (0 calls) |  | 'paid' !== 'refunded' | 
+FAIL R3 overlapping checkout retries return the stored session; the losing session is expired: the losing request returns the stored session | + actual - expected |  | + 'https://checkout.example.test/1' | - 'https://checkout.example.test/2' |                                  ^
+FAIL R4 resolving a held reschedule as "keep Bookly" keeps its email blocked until Bookly is adopted: no email for the time staff did not keep |  | 1 !== 0 | 
+FAIL R4 resolving a held reschedule as "keep local" sends its email only after Bookly accepts it: no email before Bookly accepts the kept version |  | 1 !== 0 | 
+FAIL R5 a Checkout creation with an uncertain outcome keeps the hold, and the retry recovers the session: the hold is retained | + actual - expected |  | + 'payment_expired' | - 'payment_pending' |            ^
+PASS R5 a Checkout creation Stripe rejects still releases the hold (unchanged)
+FAIL R6 a worker that lost its lease during a command request does not overwrite the newer link: the stale receipt is not written | + actual - expected |  | + 'f1dadf83e253e873dde26cf131bec6547af52951c8cb89181e743d49b843c64c' | - 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' | 
+FAIL R7 "keep Bookly" is refused for a service or duration change it cannot apply: not reported as resolved |  | 200 !== 409 | 
+FAIL R8 "keep local" works for a rejected command whose Bookly twin never changed: {"error":"Synchronize once so the latest Bookly version is known, then try again."} |  | 409 !== 200 | 
+8 release-audit regression(s) failed
+exit=1
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: an attempted email without a stored payload goes to reconciliation, never an automatic resend
++ actual - expected
+
++ 'pending'
+- 'reconcile'
+
+    at file:///Users/axissolutions/Developer/allstar-booking-bookly/tests/migration-0010.mjs:37:8
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 'pending',
+  expected: 'reconcile',
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v22.23.1
+exit=1

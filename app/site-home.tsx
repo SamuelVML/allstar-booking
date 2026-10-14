@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import {
   formatPrice,
   type BookingSettings,
@@ -30,7 +29,7 @@ export default function SiteHome({
 }) {
   const [language, setLanguage] = useState<Language>(initialLanguage);
   const t = COPY[language];
-  const bookable = SERVICES.filter((service) => !service.isAddOn);
+  const bookable = SERVICES;
 
   function bookHref(serviceId?: string) {
     const params = new URLSearchParams();
@@ -91,7 +90,7 @@ export default function SiteHome({
         </div>
         <div>
           {bookable.map((service, index) => (
-            <Link
+            <a
               key={service.id}
               href={bookHref(service.id)}
               className="service-row"
@@ -104,12 +103,9 @@ export default function SiteHome({
                 <small>{service.durationMinutes} min</small>
               </span>
               <b>{formatPrice(service.priceCents)}</b>
-            </Link>
+            </a>
           ))}
         </div>
-        <p className="muted" style={{ margin: "14px 0 0", fontSize: 13 }}>
-          {t.addOnNote}
-        </p>
       </section>
 
       <section className="section section-tight">
@@ -257,10 +253,10 @@ export default function SiteHome({
       </footer>
 
       <div className="sticky-bar">
-        <Link className="btn btn-primary btn-block" href={bookHref()}>
+        <a className="btn btn-primary btn-block" href={bookHref()}>
           {t.bookCta}
           <ArrowRight />
-        </Link>
+        </a>
       </div>
     </div>
   );

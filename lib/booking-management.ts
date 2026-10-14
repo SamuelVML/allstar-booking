@@ -1,3 +1,4 @@
+import { filterBooklyTimes } from "@/lib/bookly";
 import { addMinutes, buildAvailableTimes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
 import {
   readBookingSettings,
@@ -5,7 +6,7 @@ import {
 } from "@/lib/booking-settings";
 
 export type ManagedBooking = {
-  id: string; reference: string; revision: number; status: string;
+  service_id: string; source?: string; id: string; reference: string; revision: number; status: string;
   appointment_date: string; start_time: string; end_time: string;
   duration_minutes: number; handling_minutes: number;
   customer_account_id: string | null; customer_name: string; customer_email: string;
@@ -30,9 +31,9 @@ export async function availableForBooking(
 ) {
   const { settings } = stored ?? await readBookingSettings(database);
   const rows = await database.prepare(
-    "SELECT slot_start FROM (SELECT slot_start, appointment_id FROM appointment_slots UNION ALL SELECT slot_start, NULL AS appointment_id FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ? AND (appointment_id IS NULL OR appointment_id != ?)",
+    "SELECT slot_start FROM (SELECT slot_start, appointment_id FROM appointment_slots UNION ALL SELECT slot_start, appointment_id FROM bookly_occupied_slots UNION ALL SELECT slot_start, NULL AS appointment_id FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ? AND (appointment_id IS NULL OR appointment_id != ?)",
   ).bind(`${date}T00:00`, `${date}T23:59`, booking.id).all<{ slot_start: string }>();
-  return buildAvailableTimes(
+  const times = buildAvailableTimes(
     date,
     booking.duration_minutes,
     new Set(rows.results.map((row) => row.slot_start)),
@@ -41,9 +42,15 @@ export async function availableForBooking(
     new Date(),
     settings,
   );
+  const filtered = await filterBooklyTimes(booking.service_id + (booking.service_name.endsWith(" + colour") ? "+colour" : ""), booking.duration_minutes + booking.handling_minutes, [{ date, times }], booking.id);
+  return filtered[0].times;
 }
 
-export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }, stored?: StoredBookingSettings) {
+/** `follow` adds statements to the change's own transaction (for example its
+ * notification obligation); they must be gated on the change's audit row. */
+export async function changeBooking(database: D1Database, booking: ManagedBooking, action: "cancel" | "reschedule" | "complete", actorId: string, target?: { date: string; time: string }, stored?: StoredBookingSettings,
+  follow?: (changeId: string) => D1PreparedStatement[]) {
+  if (booking.source === "bookly") throw new BookingConflict("Manage this Bookly appointment in Bookly.");
   const currentSettings = stored ?? await readBookingSettings(database);
   if (booking.status !== "confirmed") throw new BookingConflict("Only confirmed bookings can be changed.");
   if (action === "reschedule") {
@@ -86,6 +93,7 @@ export async function changeBooking(database: D1Database, booking: ManagedBookin
       statements.push(database.prepare(`UPDATE appointments SET status = 'cancelled', revision = revision + 1 WHERE id = ? AND ${gate}`).bind(booking.id, changeId));
     }
   }
+  if (follow) statements.push(...follow(changeId));
   let results;
   try { results = await database.batch(statements); }
   catch (error) {

@@ -12,15 +12,12 @@ export const BACKSTAGE_REFRESH_MS = 30_000;
 export function recommendationUrl({
   serviceId,
   date,
-  colourAddOn = false,
 }: {
   serviceId: string;
   date: string;
-  colourAddOn?: boolean;
 }) {
   if (!serviceId || !date) return null;
   const params = new URLSearchParams({ service: serviceId, date });
-  if (colourAddOn) params.set("addOn", "colour");
   return `/api/admin/recommendations?${params.toString()}`;
 }
 
@@ -42,7 +39,6 @@ export type RankedRecommendation = {
 export default function SamaritanPanel({
   serviceId,
   date,
-  colourAddOn = false,
   revision,
   selectedTime,
   onPick,
@@ -50,13 +46,12 @@ export default function SamaritanPanel({
   serviceId: string;
   /** Limits the ranking to one day. */
   date: string;
-  colourAddOn?: boolean;
   /** Bumped after every schedule mutation to force a refetch. */
   revision: number;
   selectedTime?: string;
   onPick: (time: string) => void;
 }) {
-  const url = recommendationUrl({ serviceId, date, colourAddOn });
+  const url = recommendationUrl({ serviceId, date });
 
   const { data, error, loading } = useLiveResource<{
     recommendations?: RankedRecommendation[];

@@ -1,0 +1,8 @@
+/                                                          200 <!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" a
+/book                                                      200 <!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="stylesheet
+/api/availability?date=2026-10-16&service=haircut          200 {"date":"2026-10-16","service":"haircut","times":["10:00","10:05","10:10","10:15","10:20","10:25","10:30","10:35","10:40","10:45","10:50","10:55","11:
+/api/availability?date=2026-10-16&service=beard-trim-shape 404 error code: 1042 
+/admin                                                     404 error code: 1042 
+/api/admin/bookly                                          403 {"error":"Not authorised."}
+/api/admin/attention                                       403 {"error":"Not authorised."}
+/api/admin/bookly?report=activation                        403 {"error":"Not authorised."}

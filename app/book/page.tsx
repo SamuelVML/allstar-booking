@@ -15,12 +15,12 @@ export const dynamic = "force-dynamic";
 export default async function BookPage({
   searchParams,
 }: {
-  searchParams: Promise<{ service?: string; addOn?: string; lang?: string }>;
+  searchParams: Promise<{ service?: string; lang?: string }>;
 }) {
   const params = await searchParams;
   const initialService =
     params.service &&
-    SERVICES.some((service) => service.id === params.service && !service.isAddOn)
+    SERVICES.some((service) => service.id === params.service)
       ? params.service
       : SERVICES[0].id;
   const language: Language = isLanguage(params.lang) ? params.lang : "en";
@@ -30,7 +30,6 @@ export default async function BookPage({
     <main>
       <BookingForm
         initialService={initialService}
-        initialColourAddOn={params.addOn === "colour"}
         initialLanguage={language}
         stripeEnabled={stripeIsConfigured()}
         today={getTodayInEindhoven()}

@@ -1,0 +1,43 @@
+# tests/release-audit.mjs at aedbb6d (before corrections)
+PASS F1 a staff edit racing a Bookly deletion keeps the booking and its slots; the time cannot be double-booked
+PASS F1 an unraced Bookly deletion still cancels, releases the slots and refunds once
+PASS F2 a reschedule Bookly rejects is reported as rejected, not notified, and restored to its original time
+PASS F2 a reschedule queued while Bookly is unreachable is notified only after Bookly accepts it
+PASS F2 a queued reschedule Bookly rejects later is restored and never notified
+PASS F2 a reschedule Bookly accepts is confirmed and notified once (unchanged)
+PASS F3 one conflicted command is held; snapshots, exports and refunds continue
+PASS F3 later changes to a held booking wait behind its conflict (ordering preserved)
+PASS F3 conflict isolation is bounded: too many held records stop synchronization
+PASS F3 staff resolve a held conflict by keeping the Bookly version
+PASS F3 staff resolve a held conflict by keeping the local version
+PASS F4 a failed refund for a Bookly cancellation is retried automatically with backoff, once
+PASS F4 a failed late-payment refund is retried by the Cron task even with Bookly disabled
+PASS F4 a refund that keeps failing stops after its last automatic attempt and stays retryable by staff
+PASS F5 a worker that lost its lease commits no cancellation and no refund
+PASS F5 a worker that lost its lease cannot cancel a booking deleted in Bookly
+PASS F6 a notification retry sends the stored payload under the same key
+PASS F7 an uncertain delivery older than the provider key window goes to reconciliation, not a resend
+PASS F7 an uncertain delivery inside the window is retried under the same key and completes once
+PASS F8 retrying an interrupted pre-checkout request resumes payment without a second booking
+PASS F8 concurrent retries of one request create one Checkout Session
+PASS F8 an interruption after Checkout creation recovers the same session on retry
+PASS F8 a cash booking retry still confirms once (unchanged)
+PASS R2 refund retries are not starved by a persistent notification backlog
+PASS R3 overlapping checkout retries return the stored session; the losing session is expired
+PASS R4 resolving a held reschedule as "keep Bookly" keeps its email blocked until Bookly is adopted
+PASS R4 resolving a held reschedule as "keep local" sends its email only after Bookly accepts it
+PASS R5 a Checkout creation with an uncertain outcome keeps the hold, and the retry recovers the session
+PASS R5 a Checkout creation Stripe rejects still releases the hold (unchanged)
+PASS R6 a worker that lost its lease during a command request does not overwrite the newer link
+PASS R7 "keep Bookly" is refused for a service or duration change it cannot apply
+PASS R8 "keep local" works for a rejected command whose Bookly twin never changed
+FAIL R9 "keep Bookly" is refused for a service change that coincides with a local edit: not reported as resolved |  | 200 !== 409 |  @ at file:///Users/axissolutions/Developer/allstar-booking-bookly/tests/release-audit.mjs:674:10
+FAIL R10 "keep Bookly" is refused for a record Bookly never accepted: Bookly has no version to keep |  | 200 !== 409 |  @ at file:///Users/axissolutions/Developer/allstar-booking-bookly/tests/release-audit.mjs:685:10
+FAIL R11 a command discarded while in flight does not settle as delivered; its record is held again: the discarded command is not marked delivered |  | 2 !== 1 |  @ at file:///Users/axissolutions/Developer/allstar-booking-bookly/tests/release-audit.mjs:698:10
+3 release-audit regression(s) failed
+exit: 1
+
+# Added after aedbb6d: "R11 a command discarded while in flight and then
+# rejected by Bookly settles nothing", run against the corrected code with
+# only the pending-status guard in settleRejectedCommand removed:
+FAIL R11 a command discarded while in flight and then rejected by Bookly settles nothing: the staff choice is not reopened |  | null !== 'bookly' |  @ at file:///Users/axissolutions/Developer/allstar-booking-bookly/tests/release-audit.mjs:718:10

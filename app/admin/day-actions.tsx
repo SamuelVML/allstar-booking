@@ -18,7 +18,7 @@ import {
 import { ArrowLeft, Check, Close } from "@/lib/icons";
 import SamaritanPanel from "./samaritan-panel";
 
-const BOOKABLE = SERVICES.filter((service) => !service.isAddOn);
+const BOOKABLE = SERVICES;
 const RESCHEDULE_DAYS = 14;
 
 type TimeOffConflict = {
@@ -669,7 +669,7 @@ export default function DayActionsProvider({
               </div>
             )}
 
-            {canRecordPayment(selected) && (
+            {selected.source !== "bookly" && canRecordPayment(selected) && (
               <>
                 <p className="eyebrow sheet-label">
                   Record payment received · {formatPrice(selected.price_cents)}
@@ -712,14 +712,20 @@ export default function DayActionsProvider({
                 </div>
               )}
 
-            {selected.status === "payment_pending" && (
+            {selected.source === "bookly" && (
+              <div className="sheet-actions">
+                <p className="notice">This appointment is managed in Bookly. Payments and changes stay there.</p>
+                <a className="btn btn-primary" href="https://all-star-barbershop.com/wp-admin/admin.php?page=bookly-calendar" target="_blank" rel="noopener noreferrer">Open Bookly calendar</a>
+              </div>
+            )}
+            {selected.source !== "bookly" && selected.status === "payment_pending" && (
               <p className="notice" style={{ margin: "16px var(--gutter) 0" }}>
                 Online payment pending — the slot is held for {settings.paymentHoldMinutes} minutes. Stripe bookings
                 can&apos;t be marked paid manually.
               </p>
             )}
 
-            {canManage(selected) && (
+            {selected.source !== "bookly" && canManage(selected) && (
               <div className="sheet-actions">
                 <button
                   type="button"

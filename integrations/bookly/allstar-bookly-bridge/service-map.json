@@ -1,0 +1,19 @@
+{
+  "generatedFrom": "lib/booking.ts SERVICES (owner decision D06; regenerate with node scripts/bookly-service-map.mjs)",
+  "services": {
+    "haircut": 1,
+    "line-up": 2,
+    "beard-shape": 4,
+    "line-up-beard-shave": 13,
+    "line-up-beard-model": 14,
+    "line-up-beard-model-colour": 16,
+    "haircut-colour": 17,
+    "haircut-beard-trim": 18,
+    "haircut-beard-shape": 19,
+    "haircut-beard-shape-colour": 20,
+    "kids-haircut": 21,
+    "toddler-haircut": 22,
+    "kids-haircut-x2": 23,
+    "student-haircut": 26
+  }
+}

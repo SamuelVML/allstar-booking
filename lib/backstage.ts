@@ -1,7 +1,9 @@
+import { filterBooklyTimes } from "@/lib/bookly";
 import { addMinutes, buildAvailableTimes, getService, makeSlotKeys } from "@/lib/booking";
 import { BookingConflict, validManagementDate } from "@/lib/booking-management";
 import { readBookingSettings, type StoredBookingSettings } from "@/lib/booking-settings";
 import type { ManagedBooking } from "@/lib/booking-management";
+import { cancellationObligations } from "@/lib/booking-obligations";
 
 async function batch(database: D1Database, statements: D1PreparedStatement[]) {
   try { return await database.batch(statements); }
@@ -55,7 +57,7 @@ function datesBetween(fromDate: string, toDate: string) {
   return dates;
 }
 
-export async function blockFullDays(
+function fullDayStatements(
   database: D1Database,
   input: { fromDate: string; toDate: string; reason: string },
   actor: string,
@@ -96,8 +98,69 @@ export async function blockFullDays(
     blockedDays += 1;
   }
   if (blockedDays === 0) throw new BookingConflict("That period contains no open shop days.");
+  return { statements, blockedDays };
+}
+
+export async function blockFullDays(
+  database: D1Database,
+  input: { fromDate: string; toDate: string; reason: string },
+  actor: string,
+  stored: StoredBookingSettings,
+) {
+  const { statements, blockedDays } = fullDayStatements(database, input, actor, stored);
   await batch(database, statements);
   return blockedDays;
+}
+
+/** Block a vacation and cancel the bookings it covers in one D1 transaction.
+ *
+ * Each booking is guarded: if it changed since it was read (revision, status
+ * or payment), the guard row violates its CHECK constraint and the whole batch
+ * rolls back, including the vacation. Slots are released before the time-off
+ * slots are inserted, so the overlap triggers still reject any booking that
+ * appeared concurrently (rolling everything back). Refund and email
+ * obligations are written in the same transaction and processed after commit.
+ */
+export async function blockFullDaysCancelling(
+  database: D1Database,
+  input: { fromDate: string; toDate: string; reason: string },
+  conflicts: ManagedBooking[],
+  actor: string,
+  stored: StoredBookingSettings,
+) {
+  const { statements: timeOff, blockedDays } = fullDayStatements(database, input, actor, stored);
+  const statements: D1PreparedStatement[] = [];
+  const changeIds: string[] = [];
+  for (const booking of conflicts) {
+    if (booking.source === "bookly" || booking.status !== "confirmed") {
+      throw new BookingConflict("The booking changed. Refresh before retrying.");
+    }
+    const changeId = crypto.randomUUID();
+    const guard = crypto.randomUUID();
+    changeIds.push(changeId);
+    statements.push(
+      database.prepare(`INSERT INTO bookly_revision_guards (id, valid)
+        SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM appointments WHERE id = ? AND revision = ? AND status = 'confirmed'
+          AND payment_status = ? AND payment_method = ?) THEN 1 ELSE 0 END`)
+        .bind(guard, booking.id, booking.revision, booking.payment_status, booking.payment_method),
+      database.prepare(`INSERT INTO booking_changes (id, appointment_id, revision, action, actor_id, previous_date, previous_time)
+        SELECT ?, id, revision + 1, 'cancel', ?, appointment_date, start_time FROM appointments WHERE id = ? AND revision = ?`)
+        .bind(changeId, actor, booking.id, booking.revision),
+      database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(booking.id),
+      database.prepare("UPDATE appointments SET status = 'cancelled', revision = revision + 1 WHERE id = ? AND revision = ?")
+        .bind(booking.id, booking.revision),
+      ...cancellationObligations(database, booking, changeId),
+      database.prepare("DELETE FROM bookly_revision_guards WHERE id = ?").bind(guard),
+    );
+  }
+  try { await database.batch([...statements, ...timeOff]); }
+  catch (error) {
+    if (error instanceof Error && /CHECK constraint failed|UNIQUE constraint failed|Slot unavailable/.test(error.message)) {
+      throw new BookingConflict("A booking or the calendar changed. Nothing was cancelled; refresh before retrying.");
+    }
+    throw error;
+  }
+  return { blockedDays, changeIds };
 }
 
 export async function removeBlock(database: D1Database, id: string, actor: string) {
@@ -111,13 +174,15 @@ export async function createWalkIn(database: D1Database, input: { id: string; da
   const stored = supplied ?? await readBookingSettings(database);
   const { settings } = stored;
   const service = getService(input.serviceId);
-  if (!service || service.isAddOn || !validManagementDate(input.date, settings.bookingWindowDays)) throw new BookingConflict(`Choose a valid service and date within ${settings.bookingWindowDays} days.`);
-  const rows = await database.prepare("SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?")
+  if (!service || !validManagementDate(input.date, settings.bookingWindowDays)) throw new BookingConflict(`Choose a valid service and date within ${settings.bookingWindowDays} days.`);
+  const rows = await database.prepare("SELECT slot_start FROM (SELECT slot_start FROM appointment_slots UNION ALL SELECT slot_start FROM bookly_occupied_slots UNION ALL SELECT slot_start FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?")
     .bind(`${input.date}T00:00`, `${input.date}T23:59`).all<{ slot_start: string }>();
   // Staff can book from the current time, without the online one-hour lead time.
   if (!buildAvailableTimes(input.date, service.durationMinutes, new Set(rows.results.map(row => row.slot_start)), settings.handlingBufferMinutes, 0, new Date(), settings).includes(input.time)) {
     throw new BookingConflict("That time is unavailable. Check opening hours, breaks and existing bookings.");
   }
+  const checked = await filterBooklyTimes(service.id, service.durationMinutes + settings.handlingBufferMinutes, [{ date: input.date, times: [input.time] }]);
+  if (!checked[0].times.includes(input.time)) throw new BookingConflict("That time is occupied in Bookly.");
   const reference = `WI-${input.date.replaceAll("-", "")}-${input.id.slice(0, 8).toUpperCase()}`;
   await batch(database, [
     database.prepare(`INSERT INTO appointments (id, reference, service_id, service_name, duration_minutes, price_cents,
@@ -135,7 +200,7 @@ export async function recordPayment(database: D1Database, input: { id: string; r
   const results = await batch(database, [
     database.prepare(`INSERT INTO payment_receipts (id, appointment_id, amount_cents, method, actor_id)
       SELECT ?, id, price_cents, ?, ? FROM appointments WHERE reference = ? AND revision = ?
-      AND status IN ('confirmed', 'completed') AND payment_status = 'due_at_shop' AND payment_method != 'stripe'`)
+      AND source != 'bookly' AND status IN ('confirmed', 'completed') AND payment_status = 'due_at_shop' AND payment_method != 'stripe'`)
       .bind(input.id, input.method, actor, input.reference, input.revision),
     database.prepare(`UPDATE appointments SET payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP, revision = revision + 1
       WHERE reference = ? AND revision = ? AND EXISTS (SELECT 1 FROM payment_receipts WHERE id = ? AND appointment_id = appointments.id)`)

@@ -1,0 +1,82 @@
+<?php
+// Isolated protocol tests. Real Bookly/MySQL concurrency is a staging check.
+namespace Bookly\Lib\Utils { class Appointment { public static $checks = array(); public static function checkTime(...$args) { return self::$checks; } } }
+namespace BooklyPro\Lib { class Plugin {} }
+// Bookly services as the plugin reads them: duration in seconds (Bookly ID 26 = 40 min, every other = 30 min).
+namespace Bookly\Lib\Entities { class Service { public $duration; public static function find($id) { $s = new self(); $s->duration = (int)$id === 26 ? 2400 : 1800; return $s; } public function getDuration() { return $this->duration; } } }
+namespace {
+define('ABSPATH', '/tmp/'); define('DAY_IN_SECONDS', 86400);
+define('ALLSTAR_BOOKLY_SECRET', str_repeat('x',40)); define('ALLSTAR_BOOKLY_STAFF_ID',5);
+// The service map ships with the plugin (service-map.json). An optional
+// wp-config override must equal it exactly: ALLSTAR_TEST_SERVICE_OVERRIDE=match
+// runs every check with an identical override; =mismatch checks fail-closed.
+$bundledServices = json_decode(file_get_contents(__DIR__.'/../integrations/bookly/allstar-bookly-bridge/service-map.json'), true)['services'];
+$overrideMode = getenv('ALLSTAR_TEST_SERVICE_OVERRIDE') ?: 'none';
+if ($overrideMode === 'match') { define('ALLSTAR_BOOKLY_SERVICES', array_reverse($bundledServices, true)); }
+if ($overrideMode === 'mismatch') { define('ALLSTAR_BOOKLY_SERVICES', array('haircut'=>1)); }
+class WP_Error { public $code,$message,$data; public function __construct($c,$m,$d){$this->code=$c;$this->message=$m;$this->data=$d;} }
+class WP_REST_Response { public $data,$headers=array(); public function __construct($d){$this->data=$d;} public function header($k,$v){$this->headers[$k]=$v;} }
+class TestRequest {
+ public $headers=array(),$body,$route;
+ public function __construct($route,$input){$this->route='/allstar-bookly/v1/'.$route;$this->body=json_encode($input);$this->headers=array('x-allstar-timestamp'=>(string)time(),'x-allstar-nonce'=>'12345678-1234-1234-1234-123456789abc');$this->sign();}
+ public function sign(){$this->headers['x-allstar-signature']=hash_hmac('sha256',$this->headers['x-allstar-timestamp']."\n".$this->headers['x-allstar-nonce']."\n".$this->route."\n".$this->body,ALLSTAR_BOOKLY_SECRET);}
+ public function get_header($key){return $this->headers[$key]??'';} public function get_body(){return $this->body;} public function get_route(){return $this->route;} public function get_json_params(){return json_decode($this->body,true);}
+}
+class FakeDatabase {
+ public $prefix='wp_', $last_error='', $nonces=array(),$commands=array(),$queries=array(),$busy=null;
+ public function prepare($sql,...$args){foreach($args as $a){$sql=preg_replace('/%[sd]/',is_int($a)?(string)$a:"'".addslashes($a)."'",$sql,1);}return $sql;}
+ public function query($sql){$this->queries[]=$sql;return 1;}
+ public function insert($table,$data){if(str_ends_with($table,'nonces')){if(isset($this->nonces[$data['nonce']]))return false;$this->nonces[$data['nonce']]=true;}if(str_ends_with($table,'commands'))$this->commands[$data['id']]=$data;return 1;}
+ public function get_var($sql){$this->queries[]=$sql;if(str_contains($sql,'information_schema'))return 'InnoDB';if(str_contains($sql,'GET_LOCK')||str_contains($sql,'RELEASE_LOCK'))return 1;return $this->busy;}
+ public function get_row($sql,$format){if(str_contains($sql,'allstar_bridge_commands')&&preg_match("/id = '([^']+)'/",$sql,$m))return $this->commands[$m[1]]??null;return null;}
+ public function get_results($sql,$format){return array();}
+}
+$wpdb=new FakeDatabase();
+function register_activation_hook(...$args){} function register_deactivation_hook(...$args){} function add_action(...$args){} function add_filter(...$args){}
+function get_option($name){return $name==='timezone_string'?'Europe/Amsterdam':null;} function wp_json_encode($v){return json_encode($v);}
+function wp_date($format,$time){return date($format,$time);} function sanitize_text_field($v){return $v;} function sanitize_textarea_field($v){return $v;} function sanitize_email($v){return $v;}
+define('ARRAY_A','ARRAY_A');
+require __DIR__.'/../integrations/bookly/allstar-bookly-bridge/allstar-bookly-bridge.php';
+function check($condition,$message){if(!$condition)throw new \RuntimeException($message);}
+if ($overrideMode === 'mismatch') {
+ check(AllStar_Bookly_Bridge::serviceMap()===null,'a differing override disables the map');
+ $refused=AllStar_Bookly_Bridge::authorize(new TestRequest('snapshot',array()));
+ check($refused instanceof WP_Error && $refused->code==='bridge_unconfigured' && $refused->data['status']===503,'a differing override fails closed');
+ echo "PASS: a wp-config service map that differs from the bundled map fails closed\n"; exit(0);
+}
+$map=AllStar_Bookly_Bridge::serviceMap(); ksort($bundledServices);
+check($map===$bundledServices,'the bridge uses the bundled one-to-one service map');
+check(count(array_unique($map))===count($map),'one Bookly service per website key');
+$mapped=new ReflectionMethod('AllStar_Bookly_Bridge','shape');
+$shaped=$mapped->invoke(null,array('ca_id'=>9,'local_id'=>null,'kind'=>null,'service_id'=>26,'service_name'=>'Hair cut Student 16 years +','custom_service_name'=>null,
+ 'start_date'=>'2026-11-03 10:00:00','end_date'=>'2026-11-03 10:40:00','extras_duration'=>0,'padding_left'=>0,'padding_right'=>0,'status'=>'approved',
+ 'customer_name'=>'N','customer_email'=>'n@example.test','customer_phone'=>'1','notes'=>'','price'=>'33.50','payment_status'=>'pending','participants'=>1));
+check($shaped['serviceId']==='student-haircut' && $shaped['priceCents']===3350 && $shaped['durationMinutes']===40,'a Bookly row maps back to its website key with Bookly price and duration');
+$unsigned=new TestRequest('snapshot',array());$unsigned->headers['x-allstar-signature']='bad';check(AllStar_Bookly_Bridge::authorize($unsigned)->data['status']===403,'invalid signature');
+$stale=new TestRequest('snapshot',array());$stale->headers['x-allstar-timestamp']=(string)(time()-300);$stale->sign();check(AllStar_Bookly_Bridge::authorize($stale)->data['status']===403,'expired request');
+$signed=new TestRequest('snapshot',array());check(AllStar_Bookly_Bridge::authorize($signed)===true,'valid signed request');check(AllStar_Bookly_Bridge::authorize($signed)->data['status']===403,'nonce replay');
+$command=new TestRequest('command',array('id'=>'cmd-1','localId'=>'removed-1','kind'=>'appointment','state'=>array('status'=>'cancelled')));
+$result=AllStar_Bookly_Bridge::command($command);check($result instanceof WP_REST_Response && $result->data['terminal']===true,'terminal unlinked command');
+$replayed=AllStar_Bookly_Bridge::command($command);check($replayed->data===$result->data,'identical command replay');
+$changed=new TestRequest('command',array('id'=>'cmd-1','localId'=>'different','state'=>array('status'=>'cancelled')));check(AllStar_Bookly_Bridge::command($changed)->data['status']===409,'different payload same command ID');
+check(count($wpdb->commands)===1,'no duplicate command records');
+// A refusal no retry can change is reported as permanent (422), not as a
+// transient outage (503): the Worker holds that record for staff instead of
+// retrying it, and nothing is recorded or written in Bookly.
+$active=array('status'=>'confirmed','date'=>'2026-11-03','time'=>'10:00','durationMinutes'=>20,'handlingMinutes'=>10,'customerName'=>'N','customerEmail'=>'n@example.test','customerPhone'=>'1','notes'=>'');
+$unmapped=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-unmapped','localId'=>'legacy-1','kind'=>'appointment','expectedVersion'=>'','state'=>$active+array('serviceId'=>'beard-trim-shape'))));
+check($unmapped instanceof WP_Error && $unmapped->data['status']===422 && str_starts_with($unmapped->message,'service_map:'),'an unmapped service is a permanent refusal (422 service_map)');
+$longer=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-duration','localId'=>'legacy-2','kind'=>'appointment','expectedVersion'=>'','state'=>array_merge($active,array('serviceId'=>'student-haircut','durationMinutes'=>30)))));
+check($longer instanceof WP_Error && $longer->data['status']===422 && str_starts_with($longer->message,'duration_map:'),'a duration that differs from Bookly is a permanent refusal (422 duration_map)');
+$invalid=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-invalid','localId'=>'legacy-3','kind'=>'appointment','expectedVersion'=>'','state'=>array_merge($active,array('serviceId'=>'haircut','time'=>'25:00')))));
+check($invalid instanceof WP_Error && $invalid->data['status']===422,'an invalid record is a permanent refusal (422)');
+check(!isset($wpdb->commands['cmd-unmapped']) && !isset($wpdb->commands['cmd-duration']),'a refused command is not recorded');
+$free=new ReflectionMethod('AllStar_Bookly_Bridge','free');
+\Bookly\Lib\Utils\Appointment::$checks=array('interval_not_in_staff_schedule'=>true);
+check($free->invoke(null,'2026-11-03','10:00',40,1)===false,'staff schedule blocks invalid slots');
+check($free->invoke(null,'2026-11-03','10:00',540,null)===true,'full day block is not refused for intersecting staff breaks');
+\Bookly\Lib\Utils\Appointment::$checks=array();$wpdb->busy=99;
+check($free->invoke(null,'2026-11-03','10:00',40,1)===false,'active overlap blocks booking');
+check(str_contains(end($wpdb->queries),"NOT IN ('cancelled','rejected','waitlisted')"),'terminal participants do not occupy time');
+echo "PASS: PHP syntax/runtime, bundled service map ($overrideMode override), HMAC expiry and replay, idempotent commands, altered-payload refusal, permanent 422 mapping refusals, staff schedule and full-day blocks\n";
+}
