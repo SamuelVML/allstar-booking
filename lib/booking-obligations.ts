@@ -148,7 +148,8 @@ async function notify(database: D1Database, claim: Claim, booking: ManagedBookin
   // One read: the change, its refund obligation and the calendar delivery state.
   const state = await database.prepare(`SELECT c.action AS change_action, c.previous_date, c.previous_time, c.new_date, c.new_time,
       (SELECT json_object('status', status, 'outcome', outcome, 'attempts', attempts) FROM booking_obligations WHERE change_id = c.id AND kind = 'refund') AS refund,
-      EXISTS (SELECT 1 FROM bookly_commands WHERE local_id = c.appointment_id AND status IN ('pending','held')) AS calendar_pending
+      EXISTS (SELECT 1 FROM bookly_commands WHERE local_id = c.appointment_id AND status IN ('pending','held'))
+        OR EXISTS (SELECT 1 FROM bookly_conflicts WHERE local_id = c.appointment_id) AS calendar_pending
     FROM booking_changes c WHERE c.id = ?`)
     .bind(row.change_id).first<ChangeRow & { refund: string | null; calendar_pending: number }>();
   if (!state) throw new Error("Booking change not found.");

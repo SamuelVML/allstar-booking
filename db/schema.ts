@@ -188,10 +188,13 @@ export const booklyRevisionGuards = sqliteTable("bookly_revision_guards", {
 }, table => [check("bookly_revision_guards_valid", sql`${table.valid} = 1`)]);
 // Records held for staff reconciliation instead of blocking unrelated sync
 // work (lib/bookly.ts). See 0010_release_audit_remediation.sql.
+// A resolved row stays until the chosen version reaches both calendars, so the
+// record's customer email stays blocked meanwhile.
 export const booklyConflicts = sqliteTable("bookly_conflicts", {
   localId: text("local_id").primaryKey(), remoteId: text("remote_id"), remoteVersion: text("remote_version"),
   reason: text("reason").notNull(), detectedAt: text("detected_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+  resolution: text("resolution", { enum: ["bookly", "local"] }),
+}, table => [check("bookly_conflicts_resolution", sql`${table.resolution} IS NULL OR ${table.resolution} IN ('bookly','local')`)]);
 
 // Durable side effects of a committed booking change (refund, customer email).
 // Written in the same transaction as the change; processed afterwards by

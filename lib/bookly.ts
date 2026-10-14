@@ -89,12 +89,17 @@ async function assertLeaseHeld(database: D1Database, lease: string) {
 }
 
 /** Hold a record for staff reconciliation. The latest remote version is kept
- * so staff can choose to keep the local version. */
+ * so staff can choose to keep the local version. A new conflict reopens a
+ * resolution that had not reached both calendars yet. */
 function recordConflict(database: D1Database, localId: string, reason: string, remote?: { remoteId: string; version: string | null }) {
   return database.prepare(`INSERT INTO bookly_conflicts(local_id,remote_id,remote_version,reason) VALUES (?,?,?,?)
-    ON CONFLICT(local_id) DO UPDATE SET remote_id=COALESCE(excluded.remote_id,remote_id),remote_version=COALESCE(excluded.remote_version,remote_version),reason=excluded.reason`)
+    ON CONFLICT(local_id) DO UPDATE SET remote_id=COALESCE(excluded.remote_id,remote_id),remote_version=COALESCE(excluded.remote_version,remote_version),
+      reason=excluded.reason,resolution=NULL`)
     .bind(localId, remote?.remoteId ?? null, remote?.version ?? null, reason.slice(0, 300));
 }
+/** Bookly changed a booking's service or duration. Adopting it would change
+ * the local price, so staff cannot resolve it by keeping the Bookly version. */
+const SERVICE_CHANGED = "Service or duration changed in Bookly. Review the booking before syncing its price.";
 
 async function digest(value: unknown) {
   const result = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
@@ -193,7 +198,7 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
   // record gets nothing until staff reconcile it, so no later change for it can
   // overtake the held one; other records are unaffected.
   const pending = new Set((await database.prepare(`SELECT local_id FROM bookly_commands WHERE status IN ('pending','held')
-    UNION SELECT local_id FROM bookly_conflicts`).all<{ local_id: string }>()).results.map(row => row.local_id));
+    UNION SELECT local_id FROM bookly_conflicts WHERE resolution IS NULL`).all<{ local_id: string }>()).results.map(row => row.local_id));
   const inserts: D1PreparedStatement[] = [];
   const rows = (await database.prepare("SELECT * FROM appointments WHERE source != 'bookly'").all<Row>()).results;
   for (const row of rows) {
@@ -215,7 +220,10 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
 
 /** Deliver one stored command. Safe to call concurrently for the same row: the
  * plugin keys idempotency on the command ID and payload hash, so a second
- * delivery returns the original receipt instead of writing twice.
+ * delivery returns the original receipt instead of writing twice. With a
+ * lease (background sync) the receipt is written only while the lease is
+ * still held: a worker that lost it mid-request cannot overwrite the link a
+ * replacement worker has since advanced.
  */
 async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget, lease?: string) {
   budget?.charge(1); // the Bookly request; its D1 writes are metered by the caller's handle
@@ -228,7 +236,17 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
     if (result.remoteId) statements.push(database.prepare(`INSERT INTO bookly_links(local_id,remote_id,remote_version,local_digest,kind) VALUES (?,?,?,?,?)
       ON CONFLICT(local_id) DO UPDATE SET remote_id=excluded.remote_id,remote_version=excluded.remote_version,local_digest=excluded.local_digest`)
       .bind(row.local_id, result.remoteId, result.version, row.digest, command.kind));
-    await database.batch(statements);
+    // Bookly accepted the version staff chose to keep: the resolution is
+    // complete and the record's email may follow.
+    statements.push(database.prepare("DELETE FROM bookly_conflicts WHERE local_id=? AND resolution='local'").bind(row.local_id));
+    if (lease) {
+      const fence = leaseFence(database, lease);
+      try { await database.batch([...fence.open, ...statements, fence.close]); }
+      catch (error) {
+        if (isGuardFailure(error)) await assertLeaseHeld(database, lease);
+        throw error;
+      }
+    } else await database.batch(statements);
   } catch (error) {
     if (!(error instanceof BooklyConflict)) {
       await database.prepare("UPDATE bookly_commands SET error = 'unavailable' WHERE id = ?").bind(row.id).run();
@@ -459,7 +477,7 @@ async function adopt(database: D1Database, remote: Remote, link: Link | undefine
   if (current && link?.remote_version === remote.version) return;
   if (remote.endDate !== remote.date || remote.durationMinutes > 480) throw new BooklyUnavailable("An overnight Bookly appointment needs staff review.");
   if (current && (stateOf(current).serviceId !== remote.serviceId || current.duration_minutes !== remote.durationMinutes)) {
-    throw new BooklyConflict("Service or duration changed in Bookly. Review the booking before syncing its price.");
+    throw new BooklyConflict(SERVICE_CHANGED);
   }
   const status = current?.source !== "bookly" && remote.status === "payment_pending" && current?.status === "payment_pending"
     ? "payment_pending" : remote.status === "payment_pending" ? "confirmed" : remote.status;
@@ -637,7 +655,8 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
     await drain(database, lease, cap, budget, 3);
     // Isolation is bounded: many held records suggest the calendars are
     // diverging, so stop and let availability fail closed.
-    const held = await database.prepare(`SELECT COUNT(*) AS n FROM (SELECT local_id FROM bookly_commands WHERE status='held' UNION SELECT local_id FROM bookly_conflicts)`)
+    const held = await database.prepare(`SELECT COUNT(*) AS n FROM (SELECT local_id FROM bookly_commands WHERE status='held'
+      UNION SELECT local_id FROM bookly_conflicts WHERE resolution IS NULL)`)
       .first<{ n: number }>();
     if ((held?.n ?? 0) > MAX_HELD_CONFLICTS) throw new BooklyConflict(`${held!.n} records are held for staff reconciliation; synchronization stops until they are resolved.`);
     // Due refunds of any origin, with backoff; the rest stay due for the next run.
@@ -659,21 +678,45 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
 /** Staff reconciliation of a held record (POST /api/admin/bookly, "resolve").
  * - "bookly": drop the local change; the next sync adopts Bookly's version
  *   (or, if Bookly deleted the booking, cancels and refunds it locally).
+ *   Refused for a service or duration change, which would change the price.
  * - "local": drop the rejected command; the next sync writes the local version
  *   over Bookly's latest one (or recreates it), and Bookly still arbitrates the
  *   time slot.
+ * The conflict row stays, marked with the choice, until that version has
+ * reached both calendars (adopted, or accepted by Bookly): until then the
+ * record's customer email stays blocked, and a new conflict reopens it.
  */
 export async function resolveBooklyConflict(database: D1Database, localId: string, keep: "bookly" | "local") {
-  const conflict = await database.prepare("SELECT remote_version FROM bookly_conflicts WHERE local_id=?").bind(localId).first<{ remote_version: string | null }>();
+  const conflict = await database.prepare("SELECT remote_version, reason FROM bookly_conflicts WHERE local_id=?").bind(localId)
+    .first<{ remote_version: string | null; reason: string }>();
   const held = await database.prepare("SELECT 1 FROM bookly_commands WHERE local_id=? AND status='held'").bind(localId).first();
   if (!conflict && !held) return { ok: false as const, error: "Nothing is held for this record." };
+  const link = await database.prepare("SELECT remote_version FROM bookly_links WHERE local_id=?").bind(localId).first<{ remote_version: string }>();
   const statements = [database.prepare("UPDATE bookly_commands SET status='discarded' WHERE local_id=? AND status IN ('held','pending')").bind(localId)];
+  const mark = database.prepare(`INSERT INTO bookly_conflicts(local_id,reason,resolution) VALUES (?,?,?)
+    ON CONFLICT(local_id) DO UPDATE SET resolution=excluded.resolution`).bind(localId, "Resolved by staff.", keep);
+  const done = database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(localId);
   if (keep === "local") {
-    if (!conflict?.remote_version) return { ok: false as const, error: "Synchronize once so the latest Bookly version is known, then try again." };
-    statements.push(conflict.remote_version === "deleted"
-      ? database.prepare("DELETE FROM bookly_links WHERE local_id=?").bind(localId)
-      : database.prepare("UPDATE bookly_links SET remote_version=?,local_digest='' WHERE local_id=?").bind(conflict.remote_version, localId));
+    // A conflict found by a snapshot carries Bookly's latest version. A rejected
+    // command whose twin never changed in Bookly carries none: the link's
+    // version is then still current (a changed twin would have been recorded).
+    const version = conflict?.remote_version ?? link?.remote_version ?? null;
+    if (version === "deleted") {
+      statements.push(database.prepare("DELETE FROM bookly_links WHERE local_id=?").bind(localId));
+      // Recreated in Bookly only while it still occupies a future time.
+      const row = localId.startsWith("block-") ? null : await database.prepare("SELECT * FROM appointments WHERE id=?").bind(localId).first<Row>();
+      const block = localId.startsWith("block-") ? await database.prepare("SELECT * FROM time_off WHERE id=?").bind(localId.slice(6)).first<TimeOffRow>() : null;
+      const today = getTodayInEindhoven();
+      const recreated = row ? exportableAppointment(row, undefined, today) : block ? exportableBlock(block, undefined, today) : null;
+      statements.push(recreated ? mark : done);
+    } else {
+      if (link && version) statements.push(database.prepare("UPDATE bookly_links SET remote_version=?,local_digest='' WHERE local_id=?").bind(version, localId));
+      statements.push(mark);
+    }
   } else {
+    if (conflict?.reason === SERVICE_CHANGED) {
+      return { ok: false as const, error: "Bookly changed this booking's service or duration. Keep the local version, or cancel and rebook it." };
+    }
     let state: State | null = null;
     if (localId.startsWith("block-")) {
       const block = await database.prepare("SELECT * FROM time_off WHERE id=?").bind(localId.slice(6)).first<TimeOffRow>();
@@ -682,9 +725,10 @@ export async function resolveBooklyConflict(database: D1Database, localId: strin
       const row = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(localId).first<Row>();
       if (row) state = stateOf(row);
     }
-    if (state) statements.push(database.prepare("UPDATE bookly_links SET remote_version='',local_digest=? WHERE local_id=?").bind(await digest(state), localId));
+    if (state && link) statements.push(database.prepare("UPDATE bookly_links SET remote_version='',local_digest=? WHERE local_id=?").bind(await digest(state), localId));
+    // Never linked: Bookly has no version to adopt.
+    statements.push(link ? mark : done);
   }
-  statements.push(database.prepare("DELETE FROM bookly_conflicts WHERE local_id=?").bind(localId));
   await database.batch(statements);
   return { ok: true as const };
 }

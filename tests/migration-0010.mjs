@@ -35,7 +35,7 @@ const after = db.prepare('SELECT id,appointment_id,change_id,kind,status,attempt
 assert.deepEqual(after.filter(row => row.id !== 'notify/c1'), before.filter(row => row.id !== 'notify/c1'), 'every other obligation row survives unchanged');
 const attempted = after.find(row => row.id === 'notify/c1');
 assert.equal(attempted.status, 'reconcile', 'an attempted email without a stored payload goes to reconciliation, never an automatic resend');
-assert.equal(attempted.next_attempt_at, 0); assert.equal(attempted.attempts, 2); assert.match(attempted.last_error, /confirm with the customer/);
+assert.equal(attempted.next_attempt_at, 0); assert.equal(attempted.attempts, 2); assert.match(attempted.last_error, /confirm with the customer/i);
 assert.deepEqual(db.prepare('SELECT DISTINCT payload, first_attempt_at FROM booking_obligations').all().map(row => ({ ...row })), [{ payload: null, first_attempt_at: null }]);
 assert.deepEqual({ ...db.prepare('SELECT status,attempts,next_attempt_at FROM payment_refunds').get() }, { status: 'failed', attempts: 0, next_attempt_at: 0 }, 'a failed refund becomes due for automatic retry');
 assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);

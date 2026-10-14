@@ -222,7 +222,7 @@ const results = []; let failures = 0;
 async function check(name, fn) {
   reset();
   try { await fn(); results.push(`PASS ${name}`); }
-  catch (error) { failures += 1; results.push(`FAIL ${name}: ${error.message.split('\n').slice(0,6).join(' | ')}`); }
+  catch (error) { failures += 1; results.push(`FAIL ${name}: ${error.message.split('\n').slice(0,6).join(' | ')} @ ${(error.stack.split('\n').find(l => l.includes('release-audit.mjs')) ?? '').trim()}`); }
 }
 
 /* ----------------------------------------------------------------- F1 */
@@ -594,7 +594,7 @@ await check('R4 resolving a held reschedule as "keep local" sends its email only
   for (let i = 0; i < 2; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
   assert.equal(remoteOf(moved.id).time, '11:00');
   assert.equal(deliveriesFor(moved.reference).length, 1);
-  assert.equal((await booklyStatus()).body.conflicts.length, 0);
+  assert.equal((await booklyStatus()).body.conflicts.filter(row => row.local_id === moved.id).length, 0, 'the resolution is complete');
 });
 await check('R5 a Checkout creation with an uncertain outcome keeps the hold, and the retry recovers the session', async () => {
   markFresh(); const body = stripeRequest();

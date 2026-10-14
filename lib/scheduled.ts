@@ -15,9 +15,10 @@ export const REFUND_RESERVE = REFUND_RETRY_COST + 1;
 /** Cron Trigger body: one subrequest budget for the whole invocation. Bookly
  * synchronization runs first (fresh occupancy keeps online booking open) but,
  * when obligations or refund retries are due, without their reserved share;
- * they then use what remains. Refund retries run whether or not Bookly
- * synchronization is enabled. Failures are logged and retried on the next
- * minute.
+ * they then use what remains. When both are due they take turns going first,
+ * alternating by minute, so neither queue's backlog can starve the other.
+ * Refund retries run whether or not Bookly synchronization is enabled.
+ * Failures are logged and retried on the next minute.
  */
 export async function runScheduledTasks() {
   const total = backgroundBudget();
@@ -33,21 +34,27 @@ export async function runScheduledTasks() {
       .bind(now, MAX_REFUND_ATTEMPTS, now).first<{ obligations: number; refunds: number }>() ?? due;
   } catch { console.error("Scheduled work check failed"); }
   // One reserve, never both: it must leave the Bookly snapshot affordable on the
-  // default budget. The obligation share also covers a refund retry.
+  // default budget. The obligation share also covers a refund retry, so
+  // whichever queue goes first can always make progress.
   const reserve = due.obligations ? OBLIGATION_RESERVE : due.refunds ? REFUND_RESERVE : 0;
   const bookly = new SubrequestBudget(total.remaining - reserve);
   const outcome = await runScheduledBooklySync(bookly);
   let used = bookly.used;
-  if (due.obligations) {
-    const obligations = new SubrequestBudget(total.remaining - used);
-    try { await processBookingObligations(database, { budget: obligations }); }
+  const obligations = async () => {
+    const budget = new SubrequestBudget(total.remaining - used);
+    try { await processBookingObligations(database, { budget }); }
     catch { console.error("Scheduled booking obligations failed"); }
-    used += obligations.used;
-  }
-  if (due.refunds) {
-    const refunds = new SubrequestBudget(total.remaining - used);
-    try { await retryDueRefunds(meteredDatabase(database, refunds), database, refunds); }
+    used += budget.used;
+  };
+  const refunds = async () => {
+    const budget = new SubrequestBudget(total.remaining - used);
+    try { await retryDueRefunds(meteredDatabase(database, budget), database, budget); }
     catch { console.error("Scheduled refund retries failed"); }
-  }
+    used += budget.used;
+  };
+  const refundsFirst = due.refunds && (!due.obligations || Math.floor(Date.now() / 60_000) % 2 === 0);
+  if (refundsFirst) await refunds();
+  if (due.obligations) await obligations();
+  if (due.refunds && !refundsFirst) await refunds();
   return outcome;
 }

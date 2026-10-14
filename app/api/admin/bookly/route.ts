@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   const pending = await database.prepare("SELECT id,local_id,error,created_at FROM bookly_commands WHERE status='pending' ORDER BY created_at").all();
   // Records held for staff reconciliation; each blocks only its own record.
   const held = await database.prepare("SELECT id,local_id,error,created_at FROM bookly_commands WHERE status='held' ORDER BY created_at").all();
-  const conflicts = await database.prepare("SELECT local_id,remote_id,reason,detected_at FROM bookly_conflicts ORDER BY detected_at").all();
+  const conflicts = await database.prepare("SELECT local_id,remote_id,reason,detected_at,resolution FROM bookly_conflicts ORDER BY detected_at").all();
   const occupancyAgeSeconds = await booklyOccupancyAgeSeconds(database);
   return Response.json({ enabled: true, state, pending: pending.results, held: held.results, conflicts: conflicts.results, occupancyAgeSeconds,
     maxOccupancyAgeSeconds: BOOKLY_MAX_OCCUPANCY_AGE_SECONDS }, { headers });

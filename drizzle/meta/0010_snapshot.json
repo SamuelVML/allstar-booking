@@ -737,13 +737,25 @@
           "notNull": true,
           "autoincrement": false,
           "default": "CURRENT_TIMESTAMP"
+        },
+        "resolution": {
+          "name": "resolution",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "bookly_conflicts_resolution": {
+          "name": "bookly_conflicts_resolution",
+          "value": "\"bookly_conflicts\".\"resolution\" IS NULL OR \"bookly_conflicts\".\"resolution\" IN ('bookly','local')"
+        }
+      }
     },
     "bookly_links": {
       "name": "bookly_links",

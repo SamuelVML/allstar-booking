@@ -2,12 +2,17 @@
 -- booking_obligations is rebuilt to add the 'reconcile' status and the stored
 -- notification payload; no table references it, so the rebuild needs no
 -- foreign-key pragma (D1 enforces foreign keys during migrations).
+-- A notification 0009 already attempted (pending, attempts > 0) may have
+-- reached Resend, and 0009 stored no payload to resend verbatim: it moves to
+-- 'reconcile' for staff instead of being rebuilt and sent again.
 CREATE TABLE `bookly_conflicts` (
 	`local_id` text PRIMARY KEY NOT NULL,
 	`remote_id` text,
 	`remote_version` text,
 	`reason` text NOT NULL,
-	`detected_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL
+	`detected_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	`resolution` text,
+	CONSTRAINT "bookly_conflicts_resolution" CHECK("bookly_conflicts"."resolution" IS NULL OR "bookly_conflicts"."resolution" IN ('bookly','local'))
 );
 --> statement-breakpoint
 CREATE TABLE `__new_booking_obligations` (
@@ -30,7 +35,11 @@ CREATE TABLE `__new_booking_obligations` (
 	CONSTRAINT "booking_obligations_status" CHECK("__new_booking_obligations"."status" IN ('pending','done','failed','reconcile'))
 );
 --> statement-breakpoint
-INSERT INTO `__new_booking_obligations`("id", "appointment_id", "change_id", "kind", "status", "attempts", "next_attempt_at", "outcome", "last_error", "payload", "first_attempt_at", "created_at", "updated_at") SELECT "id", "appointment_id", "change_id", "kind", "status", "attempts", "next_attempt_at", "outcome", "last_error", NULL, NULL, "created_at", "updated_at" FROM `booking_obligations`;--> statement-breakpoint
+INSERT INTO `__new_booking_obligations`("id", "appointment_id", "change_id", "kind", "status", "attempts", "next_attempt_at", "outcome", "last_error", "payload", "first_attempt_at", "created_at", "updated_at") SELECT "id", "appointment_id", "change_id", "kind",
+	CASE WHEN "kind" = 'notify' AND "status" = 'pending' AND "attempts" > 0 THEN 'reconcile' ELSE "status" END, "attempts",
+	CASE WHEN "kind" = 'notify' AND "status" = 'pending' AND "attempts" > 0 THEN 0 ELSE "next_attempt_at" END, "outcome",
+	CASE WHEN "kind" = 'notify' AND "status" = 'pending' AND "attempts" > 0 THEN 'Attempted before stored payloads (migration 0010); delivery outcome unknown. Confirm with the customer before resending.' ELSE "last_error" END,
+	NULL, NULL, "created_at", "updated_at" FROM `booking_obligations`;--> statement-breakpoint
 DROP TABLE `booking_obligations`;--> statement-breakpoint
 ALTER TABLE `__new_booking_obligations` RENAME TO `booking_obligations`;--> statement-breakpoint
 CREATE UNIQUE INDEX `booking_obligations_change_kind` ON `booking_obligations` (`change_id`,`kind`);--> statement-breakpoint

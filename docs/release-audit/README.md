@@ -14,6 +14,7 @@ this work; `BOOKLY_SYNC_ENABLED=false` stays in force.
 | Combined head (this branch's base) | `f984288` = PR #9 head merged with PR #8 head (`ea4affa` changes documentation only; no conflicts) |
 | Regressions + migration 0010 | `5448624` — 18 checks fail, 5 controls pass ([log](evidence/release-audit-at-tests-commit.log)) |
 | Corrections | `40890f7` |
+| Re-review regressions / corrections | `ada6533` / see PR #10 |
 | Migration order | `0008_bookly_bridge` → `0009_booking_obligations` → `0010_release_audit_remediation` |
 
 The combined head is used because finding 4 builds on PR #9's durable
@@ -63,7 +64,8 @@ was already corrected by PR #9; its tests still pass.
 
 - `synchronizeBookly` no longer throws for a per-record conflict; it records it
   in `bookly_conflicts` (or a `held` command) and sets `bookly_sync_state.error`
-  to `held`. `GET /api/admin/bookly` lists `held` and `conflicts`.
+  to `held`. `GET /api/admin/bookly` lists `held` and `conflicts` (with
+  `resolution` once staff chose a version that has not reached both calendars).
 - `POST /api/admin/bookings/change` (reschedule) returns 409 with
   `changed:false, restored` when Bookly rejects the move; with Bookly
   unreachable it returns `calendar:"pending", notificationsSent:false` and the
@@ -82,6 +84,31 @@ shows exactly one refund), and the finding 8 script's Stripe double has no
 `checkout.sessions.create`, so it cannot exercise Checkout (covered by the
 `F8` regressions). The audit email mock lacks the new prepare/deliver exports,
 which is why its finding 9 line reports `notificationsSent:false`.
+
+## Codex re-review of `cc783f2` (PR #10)
+
+Codex's review of this branch raised eight further findings. Each was
+reproduced by a failing regression first (`ada6533`,
+[log](evidence/codex-rereview-at-tests-commit.log)), then corrected.
+
+| # | Finding | Correction | Regression |
+|---|---|---|---|
+| R1 (P1) | Migration kept attempted 0009 notifications `pending` without a payload, so they could be rebuilt or resent | 0010 moves `notify` rows with `status='pending' AND attempts > 0` to `reconcile` with an explanatory `last_error`; untried, done and refund rows unchanged | `tests/migration-0010.mjs` |
+| R2 (P1) | Persistent email backlog starved refund retries | When both queues are due they alternate which runs first, by minute; the reserved share always covers either one | `R2 refund retries are not starved…` |
+| R3 (P1) | An overlapping checkout retry could return an unstored session that payment confirmation never matches | The losing store returns the stored session and expires its own | `R3 overlapping checkout retries…` |
+| R4 (P1) | Resolving a held reschedule unblocked its email before the chosen version reached Bookly | `bookly_conflicts.resolution` marks a resolved row; it stays (blocking the email, not the sync) until adoption or Bookly's acceptance removes it; a new conflict reopens it | `R4 … "keep Bookly" …`, `R4 … "keep local" …` |
+| R5 (P2) | A lost Checkout creation response cancelled the hold | Only a Stripe 4xx releases the hold; any other failure keeps it for idempotent recovery (it expires like any unpaid hold) | `R5 … uncertain outcome …`, `R5 … Stripe rejects …` (control) |
+| R6 (P2) | Successful command receipts were written without the lease | Receipt batch fenced on the sync lease | `R6 a worker that lost its lease during a command request…` |
+| R7 (P2) | "Keep Bookly" reported success for a service/duration change it could not apply | Refused with 409; staff keep the local version or cancel and rebook | `R7 "keep Bookly" is refused…` |
+| R8 (P2) | "Keep local" was refused forever when Bookly's twin never changed | Falls back to the link's version (a changed twin is always recorded by the snapshot) | `R8 "keep local" works…` |
+
+Validation after the corrections: `npm test` exit 0, 0 failures
+([log](evidence/npm-test-after-rereview.log)); `tsc` clean; lint 0 errors,
+3 pre-existing warnings; build succeeds; `drizzle-kit check`/`generate`
+clean ([log](evidence/validation-after-rereview.log)). Cron budget unchanged:
+5 runs, peak 32 behind a 200-command backlog. The preserved audit scripts are
+now excluded from lint (they added 25 unused-variable warnings) so they stay
+byte-identical to `SHA256SUMS`.
 
 ## Not verified here
 
