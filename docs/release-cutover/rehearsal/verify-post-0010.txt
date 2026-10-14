@@ -1,0 +1,35 @@
+## obligations after 0010
+{'id': 'ob-1', 'kind': 'notify', 'status': 'pending', 'attempts': 0, 'next_attempt_at': 0, 'last_error': None, 'payload': None, 'first_attempt_at': None}
+{'id': 'ob-2', 'kind': 'notify', 'status': 'reconcile', 'attempts': 2, 'next_attempt_at': 0, 'last_error': 'Attempted before stored payloads (migration 0010); delivery outcome unknown. Confirm with the customer before resending.', 'payload': None, 'first_attempt_at': None}
+{'id': 'ob-3', 'kind': 'notify', 'status': 'done', 'attempts': 1, 'next_attempt_at': 0, 'last_error': None, 'payload': None, 'first_attempt_at': None}
+{'id': 'ob-4', 'kind': 'refund', 'status': 'pending', 'attempts': 1, 'next_attempt_at': 0, 'last_error': 'stripe 500', 'payload': None, 'first_attempt_at': None}
+## refunds columns
+{'n': 7, 'a': 0, 'nx': 0, 'ok': 7}
+## new table
+{'n': 0}
+## checks
+{'quick_check': 'ok'}
+## migrations
+{'id': 1, 'name': '0000_nappy_masque.sql'}
+{'id': 2, 'name': '0001_productive_blonde_phantom.sql'}
+{'id': 3, 'name': '0002_deep_sharon_ventura.sql'}
+{'id': 4, 'name': '0003_gorgeous_saracen.sql'}
+{'id': 5, 'name': '0004_exotic_lifeguard.sql'}
+{'id': 6, 'name': '0005_editable_booking_settings.sql'}
+{'id': 7, 'name': '0006_automatic_refunds.sql'}
+{'id': 8, 'name': '0007_schema_checkpoint.sql'}
+{'id': 9, 'name': '0008_bookly_bridge.sql'}
+{'id': 10, 'name': '0009_booking_obligations.sql'}
+{'id': 11, 'name': '0010_release_audit_remediation.sql'}
+appointments       local   70 remote   70 MATCH sha e8ad29fa0c02
+appointment_slots  local  453 remote  453 MATCH sha 1245dba58dcd
+time_off           local    1 remote    1 MATCH sha 2147fb6fcb4a
+time_off_slots     local  108 remote  108 MATCH sha 869050b9ae69
+payment_refunds    local    7 remote    7 MATCH sha 9be5dbac3059
+payment_receipts   local    8 remote    8 MATCH sha 3f95550ab969
+booking_changes    local   10 remote   10 MATCH sha 05c42436a95b
+customer_accounts  local   20 remote   20 MATCH sha 661173f1ccb7
+stripe_events      local   31 remote   31 MATCH sha 09de19ad05d0
+loyalty_events     local    0 remote    0 MATCH sha e3b0c44298fc
+booking_settings   local    0 remote    0 MATCH sha e3b0c44298fc
+ALL PRE-EXISTING DATA PRESERVED

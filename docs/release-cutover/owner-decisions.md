@@ -60,8 +60,14 @@ and prices, 20 customers, refunds, receipts, changes, one vacation day), then
 0008 and 0009. `rehearsal/cmp.py` rebuilds the expected state locally from the
 same files and compares every row of all 11 pre-existing tables (insert
 timestamps excluded): all match; `PRAGMA quick_check` ok; `d1_migrations`
-lists 0000→0009 in order. Production D1 untouched. Migration 0010 (part of the
-candidate) is not applied: D08 names 0008–0009 only.
+lists 0000→0009 in order. Production D1 untouched. Migration 0010 was applied after the owner extended D08 on 2026-10-14: four
+synthetic 0009 obligation rows were added first (`rehearsal/seed-0009.sql`) so the
+0010 data rule ran on real rows. Result (`rehearsal/verify-post-0010.txt`): the
+attempted `notify` row moved to `reconcile` with its staff instruction; the
+untried, done and refund rows kept their status; existing refunds got
+`attempts`/`next_attempt_at` = 0; `bookly_conflicts` created empty; all 11
+pre-existing tables still match row for row; `quick_check` ok, no foreign-key
+violations; `d1_migrations` lists 0000→0010 in order.
 
 ## D09 — Academy (approved 2026-10-14)
 

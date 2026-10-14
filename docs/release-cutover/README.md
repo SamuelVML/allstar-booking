@@ -62,7 +62,7 @@ not replace staging acceptance.
 | Production D1 `allstar-booking-prod` | 0000–0007, untouched (read-only migration list only) |
 | Staging Worker `allstar-booking-test` | v `8d6e9445` (code `0075a0c`); no Stripe, Resend or Bookly secrets; sync off; candidate **not** deployed |
 | Staging D1 `allstar-booking-test` | 0000–0007 plus Academy `0005_launch_list` (drift; not production-equivalent) |
-| Rehearsal D1 `allstar-booking-rehearsal` | 0000–0007 → synthetic seed → 0008 → 0009, data verified (see `owner-decisions.md` D08, `rehearsal/`); 0010 not applied (D08 scope) |
+| Rehearsal D1 `allstar-booking-rehearsal` | 0000–0007 → synthetic seed → 0008 → 0009 → synthetic obligations → 0010, data verified (see `owner-decisions.md` D08, `rehearsal/`) |
 | Staging WordPress | exists (D07); HTTP Basic auth on every path including the bridge REST route |
 
 ## Release blockers
@@ -83,8 +83,8 @@ not replace staging acceptance.
 6. **Pre-D06 future bookings** at Bookly activation: owner must choose move /
    cancel / enter manually in Bookly (activation report
    `GET /api/admin/bookly?report=activation`).
-7. **Rehearsal 0010**: needs D08 extension; then deploy the candidate against
-   the rehearsal D1 and rehearse rollback to `194dea2` with 0010 applied.
+7. **Rehearsal deployment**: 0010 is applied to the rehearsal D1; deploy the
+   candidate against it and rehearse rollback to `194dea2` with 0010 applied.
 8. **Staging deployment and browser acceptance** (desktop and mobile, customer
    and Backstage, failure recovery) not run.
 9. **Amaury's administration workflow** not run; his login must be in
