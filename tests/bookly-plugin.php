@@ -2,6 +2,8 @@
 // Isolated protocol tests. Real Bookly/MySQL concurrency is a staging check.
 namespace Bookly\Lib\Utils { class Appointment { public static $checks = array(); public static function checkTime(...$args) { return self::$checks; } } }
 namespace BooklyPro\Lib { class Plugin {} }
+// Bookly services as the plugin reads them: duration in seconds (Bookly ID 26 = 40 min, every other = 30 min).
+namespace Bookly\Lib\Entities { class Service { public $duration; public static function find($id) { $s = new self(); $s->duration = (int)$id === 26 ? 2400 : 1800; return $s; } public function getDuration() { return $this->duration; } } }
 namespace {
 define('ABSPATH', '/tmp/'); define('DAY_IN_SECONDS', 86400);
 define('ALLSTAR_BOOKLY_SECRET', str_repeat('x',40)); define('ALLSTAR_BOOKLY_STAFF_ID',5);
@@ -58,6 +60,17 @@ $result=AllStar_Bookly_Bridge::command($command);check($result instanceof WP_RES
 $replayed=AllStar_Bookly_Bridge::command($command);check($replayed->data===$result->data,'identical command replay');
 $changed=new TestRequest('command',array('id'=>'cmd-1','localId'=>'different','state'=>array('status'=>'cancelled')));check(AllStar_Bookly_Bridge::command($changed)->data['status']===409,'different payload same command ID');
 check(count($wpdb->commands)===1,'no duplicate command records');
+// A refusal no retry can change is reported as permanent (422), not as a
+// transient outage (503): the Worker holds that record for staff instead of
+// retrying it, and nothing is recorded or written in Bookly.
+$active=array('status'=>'confirmed','date'=>'2026-11-03','time'=>'10:00','durationMinutes'=>20,'handlingMinutes'=>10,'customerName'=>'N','customerEmail'=>'n@example.test','customerPhone'=>'1','notes'=>'');
+$unmapped=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-unmapped','localId'=>'legacy-1','kind'=>'appointment','expectedVersion'=>'','state'=>$active+array('serviceId'=>'beard-trim-shape'))));
+check($unmapped instanceof WP_Error && $unmapped->data['status']===422 && str_starts_with($unmapped->message,'service_map:'),'an unmapped service is a permanent refusal (422 service_map)');
+$longer=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-duration','localId'=>'legacy-2','kind'=>'appointment','expectedVersion'=>'','state'=>array_merge($active,array('serviceId'=>'student-haircut','durationMinutes'=>30)))));
+check($longer instanceof WP_Error && $longer->data['status']===422 && str_starts_with($longer->message,'duration_map:'),'a duration that differs from Bookly is a permanent refusal (422 duration_map)');
+$invalid=AllStar_Bookly_Bridge::command(new TestRequest('command',array('id'=>'cmd-invalid','localId'=>'legacy-3','kind'=>'appointment','expectedVersion'=>'','state'=>array_merge($active,array('serviceId'=>'haircut','time'=>'25:00')))));
+check($invalid instanceof WP_Error && $invalid->data['status']===422,'an invalid record is a permanent refusal (422)');
+check(!isset($wpdb->commands['cmd-unmapped']) && !isset($wpdb->commands['cmd-duration']),'a refused command is not recorded');
 $free=new ReflectionMethod('AllStar_Bookly_Bridge','free');
 \Bookly\Lib\Utils\Appointment::$checks=array('interval_not_in_staff_schedule'=>true);
 check($free->invoke(null,'2026-11-03','10:00',40,1)===false,'staff schedule blocks invalid slots');
@@ -65,5 +78,5 @@ check($free->invoke(null,'2026-11-03','10:00',540,null)===true,'full day block i
 \Bookly\Lib\Utils\Appointment::$checks=array();$wpdb->busy=99;
 check($free->invoke(null,'2026-11-03','10:00',40,1)===false,'active overlap blocks booking');
 check(str_contains(end($wpdb->queries),"NOT IN ('cancelled','rejected','waitlisted')"),'terminal participants do not occupy time');
-echo "PASS: PHP syntax/runtime, bundled service map ($overrideMode override), HMAC expiry and replay, idempotent commands, altered-payload refusal, staff schedule and full-day blocks\n";
+echo "PASS: PHP syntax/runtime, bundled service map ($overrideMode override), HMAC expiry and replay, idempotent commands, altered-payload refusal, permanent 422 mapping refusals, staff schedule and full-day blocks\n";
 }
