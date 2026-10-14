@@ -2,10 +2,15 @@ import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation, getStaffUser } from "@/lib/staff-auth";
 import { checkBooklyCatalogue } from "@/lib/bookly-catalogue";
-import { BOOKLY_MAX_OCCUPANCY_AGE_SECONDS, booklyEnabled, booklyOccupancyAgeSeconds, booklyRequest, resolveBooklyConflict, synchronizeBookly } from "@/lib/bookly";
+import { BOOKLY_MAX_OCCUPANCY_AGE_SECONDS, booklyActivationReport, booklyEnabled, booklyOccupancyAgeSeconds, booklyRequest, resolveBooklyConflict, synchronizeBookly } from "@/lib/bookly";
 const headers = { "Cache-Control": "private, no-store" };
 export async function GET(request: Request) {
   if (!await getStaffUser(request.headers)) return Response.json({ error: "Not authorised." }, { status: 403, headers });
+  // Read-only pre-activation check, available with the bridge off: future
+  // bookings the bridge would refuse (retired service, add-on, duration).
+  if (new URL(request.url).searchParams.get("report") === "activation") {
+    return Response.json({ enabled: booklyEnabled(), unmappable: await booklyActivationReport(getD1()) }, { headers });
+  }
   if (!booklyEnabled()) return Response.json({ enabled: false }, { headers });
   const database = getD1();
   const state = await database.prepare("SELECT last_success,error FROM bookly_sync_state WHERE id=1").first();

@@ -54,7 +54,8 @@ const pluginRefusal = (code, message) => Response.json({ code: 'bridge_command',
 const shippedServices = JSON.parse(fs.readFileSync('integrations/bookly/allstar-bookly-bridge/service-map.json', 'utf8')).services;
 let mappedServices = { ...shippedServices };
 const catalogue = JSON.parse(fs.readFileSync('docs/release-cutover/bookly-catalogue-2026-10-14.json', 'utf8')).services;
-const booklyDurations = new Map(Object.values(catalogue).map(service => [service.id, service.duration === '1 h' ? 60 : Number(service.duration.replace(' min', ''))]));
+const catalogueDurations = Object.values(catalogue).map(service => [service.id, service.duration === '1 h' ? 60 : Number(service.duration.replace(' min', ''))]);
+const booklyDurations = new Map(catalogueDurations);
 
 /* ------------------------------------------------------------ Bookly double */
 const env = { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.example.test/wp-json/allstar-bookly/v1', BOOKLY_BRIDGE_SECRET: 'x'.repeat(40),
@@ -82,6 +83,9 @@ async function bridgeFetch(url, options) {
   if (bridgeDown) throw new Error('connect ECONNREFUSED');
   if (route === 'snapshot') return Response.json({ complete: true, scopeFrom: '2000-01-01', appointments: [...remote.values()].map(row => ({ ...row })) });
   if (route === 'availability') {
+    // Plugin availability(): the service must be mapped (no duration check; the
+    // queried duration includes the handling buffer).
+    if (!mappedServices[input.serviceId]) return pluginRefusal('service_map', 'Service has not been mapped.');
     return Response.json({ days: input.days.map(day => ({ date: day.date, times: day.times.filter(time =>
       ![...remote.values()].some(row => active(row) && row.localId !== input.excludeLocalId && overlaps(row, day.date, minutes(time), input.durationMinutes))) })) });
   }
@@ -160,12 +164,12 @@ const stripe = {
 
 /* ------------------------------------------------------------ Resend double */
 const providerKeys = new Map(); // idempotency key -> body, forgotten after "24 hours"
-const deliveries = []; let resendConflicts = 0; let resendFailures = 0;
+const deliveries = []; let resendFailures = 0;
 async function resendFetch(_url, options) {
   if (resendFailures > 0) { resendFailures -= 1; return new Response('{}', { status: 500 }); }
   const key = options.headers['Idempotency-Key']; const body = JSON.parse(options.body);
   if (providerKeys.has(key)) {
-    if (JSON.stringify(providerKeys.get(key)) !== JSON.stringify(body)) { resendConflicts += 1; return Response.json({ message: 'same key, different payload' }, { status: 409 }); }
+    if (JSON.stringify(providerKeys.get(key)) !== JSON.stringify(body)) { return Response.json({ message: 'same key, different payload' }, { status: 409 }); }
     return Response.json({ id: key });
   }
   providerKeys.set(key, body); deliveries.push({ key, body });
@@ -196,11 +200,8 @@ function load(relative) {
 }
 const bridge = load('lib/bookly.ts');
 const booking = load('lib/booking.ts');
-const scheduled = load('lib/scheduled.ts');
 const operations = load('app/api/admin/operations/route.ts');
-const changeRoute = load('app/api/admin/bookings/change/route.ts');
 const bookingsRoute = load('app/api/bookings/route.ts');
-const sessionRoute = load('app/api/stripe/session/route.ts');
 const booklyAdmin = load('app/api/admin/bookly/route.ts');
 const attention = load('app/api/admin/attention/route.ts');
 const today = booking.getTodayInEindhoven();
@@ -232,10 +233,7 @@ const appointment = id => db.prepare('SELECT * FROM appointments WHERE id=?').ge
 const slotTimes = id => db.prepare('SELECT slot_start FROM appointment_slots WHERE appointment_id=? ORDER BY slot_start').all(id).map(row => row.slot_start.slice(11));
 const remoteOf = id => [...remote.values()].find(row => row.localId === id);
 const markFresh = () => db.prepare('UPDATE bookly_sync_state SET last_success=?,error=NULL WHERE id=1').run(new TestDate().toISOString());
-const refundRow = id => db.prepare('SELECT * FROM payment_refunds WHERE appointment_id=?').get(id);
-const deliveriesFor = reference => deliveries.filter(email => email.body.subject.includes(reference));
 const json = async response => ({ status: response.status, body: await response.json() });
-const changeBooking = body => changeRoute.POST(new Request('https://allstar.test/api/admin/bookings/change', { method: 'POST', body: JSON.stringify(body) })).then(json);
 const operation = body => operations.POST(new Request('https://allstar.test/api/admin/operations', { method: 'POST', body: JSON.stringify(body) })).then(json);
 const book = body => bookingsRoute.POST(new Request('https://allstar.test/api/bookings', { method: 'POST', body: JSON.stringify(body) })).then(json);
 const booklyStatus = () => booklyAdmin.GET(new Request('https://allstar.test/api/admin/bookly')).then(json);
@@ -252,10 +250,10 @@ function reset() {
   for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'test_%'").all()) db.exec(`DROP TRIGGER ${name}`);
   db.prepare('UPDATE bookly_sync_state SET lease=NULL,lease_until=0,last_success=NULL,error=NULL WHERE id=1').run();
   remote.clear(); receipts.clear(); commandLog.length = 0; providerKeys.clear(); deliveries.length = 0; stripeRefunds.clear(); checkoutKeys.clear();
-  stripeFailures = 0; stripeRefundCalls = 0; checkoutCreates = 0; resendConflicts = 0; resendFailures = 0; clockOffset = 0;
+  stripeFailures = 0; stripeRefundCalls = 0; checkoutCreates = 0; resendFailures = 0; clockOffset = 0;
   commandsDown = false; bridgeDown = false; beforeCommand = null; beforeBatch = null; env.BOOKLY_SYNC_ENABLED = 'true'; env.BOOKLY_SUBREQUEST_BUDGET = '900';
   checkoutFailure = null; afterCheckoutCreate = null; afterCheckoutReject = null; beforeRefundCreate = null; checkoutSessions.clear(); bridgeLinks.clear();
-  mappedServices = { ...shippedServices };
+  mappedServices = { ...shippedServices }; booklyDurations.clear(); for (const [id, length] of catalogueDurations) booklyDurations.set(id, length);
 }
 const results = []; let failures = 0;
 async function check(name, fn) {
@@ -335,29 +333,43 @@ await check('R17 the activation report lists future bookings Bookly cannot take,
   assert.deepEqual(Object.keys(issues).sort(), [unmapped.id, longer.id, addOn.id].sort(), 'only future active bookings Bookly would refuse');
   assert.equal(issues[unmapped.id], 'service_not_mapped'); assert.equal(issues[addOn.id], 'service_not_mapped'); assert.equal(issues[longer.id], 'duration_differs');
   assert.ok(!issues[fine.id]);
-  const anonymous = await activationReport();
-  assert.equal(anonymous.status, 200);
+  assert.equal(report.body.unmappable.find(row => row.id === addOn.id).priceCents, 5750, 'listed at the stored price');
+  const listed = await attentionList();
+  assert.deepEqual(listed.body.calendar.unmappable.map(row => row.id).sort(), Object.keys(issues).sort(), 'Backstage Attention lists them too');
 });
-await check('R17 a new website booking Bookly cannot map fails cleanly: hold released, nothing charged, nothing held', async () => {
+await check('R17 a new website booking for a service Bookly cannot map is refused before any hold or charge', async () => {
   markFresh(); const date = openDay();
   delete mappedServices.haircut; // the plugin's map lost a key the website still sells
+  for (const paymentMethod of ['stripe', 'cash']) {
+    const response = await book({ requestId: crypto.randomUUID(), serviceId: 'haircut', date, time: '10:00', paymentMethod, ...customer() });
+    assert.equal(response.status, 503); assert.match(response.body.error, /not made and nothing was charged/);
+  }
+  assert.equal(checkoutCreates, 0, 'no Checkout Session exists');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM appointments').get().n, 0, 'no hold was created');
+});
+await check('R17 a hold Bookly refuses at the command (duration changed in Bookly) is released: nothing charged, nothing held', async () => {
+  markFresh(); const date = openDay();
+  booklyDurations.set(shippedServices.haircut, 40); // Bookly's haircut changed after this release
   const response = await book({ requestId: crypto.randomUUID(), serviceId: 'haircut', date, time: '10:00', paymentMethod: 'stripe', ...customer() });
-  assert.equal(response.status, 503); assert.match(response.body.error, /not booked|nothing was charged/i);
+  assert.equal(response.status, 503); assert.match(response.body.error, /not made and nothing was charged/);
   assert.equal(checkoutCreates, 0, 'no Checkout Session exists');
   const row = db.prepare('SELECT * FROM appointments WHERE appointment_date=? AND start_time=?').get(date, '10:00');
   assert.notEqual(row.status, 'payment_pending'); assert.deepEqual(slotTimes(row.id), [], 'the time is released');
-  assert.equal(heldFor(row.id)?.status, 'rejected'); assert.equal(conflictFor(row.id), undefined, 'nothing waits for staff');
-  const cash = await book({ requestId: crypto.randomUUID(), serviceId: 'haircut', date, time: '12:00', paymentMethod: 'cash', ...customer() });
+  assert.equal(heldFor(row.id)?.status, 'rejected'); assert.equal(heldFor(row.id)?.error, 'mapping');
+  assert.equal(conflictFor(row.id), undefined, 'nothing waits for staff');
+  const cash = await book({ requestId: crypto.randomUUID(), serviceId: 'haircut', date, time: '13:00', paymentMethod: 'cash', ...customer() });
   assert.equal(cash.status, 503);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM appointments WHERE status IN ('confirmed','payment_pending')").get().n, 0, 'no confirmed booking the customer was told failed');
+  assert.equal(deliveries.length, 0, 'no confirmation email');
 });
 await check('R17 a walk-in Bookly cannot map is not added', async () => {
   markFresh(); const date = openDay();
-  delete mappedServices.haircut;
+  booklyDurations.set(shippedServices.haircut, 40);
   const id = crypto.randomUUID();
   const response = await operation({ action: 'walk_in', id, serviceId: 'haircut', date, time: '10:00', name: 'Walk In', notes: '' });
   assert.equal(response.status, 409); assert.match(response.body.error, /not mapped|cannot take/i);
   assert.deepEqual(slotTimes(id), []);
+  assert.notEqual(appointment(id)?.status, 'confirmed', 'the walk-in is released');
 });
 await check('R17 staff can close a held legacy booking by cancelling it and keeping the local version', async () => {
   markFresh(); const unmapped = legacy(openDay(), '10:00');
@@ -395,6 +407,24 @@ await check('R18 a new request for a retired service or the add-on is still refu
   assert.equal((await book({ requestId: crypto.randomUUID(), serviceId: 'beard-trim-shape', date, time: '10:00', paymentMethod: 'cash', ...customer() })).status, 400);
   assert.equal((await book({ requestId: crypto.randomUUID(), serviceId: 'haircut', colourAddOn: true, date, time: '10:00', paymentMethod: 'cash', ...customer() })).status, 400);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM appointments').get().n, 0);
+});
+await check('R18 a retried confirmed booking from before D06 is never cancelled when Bookly refuses it', async () => {
+  markFresh(); const date = openDay();
+  const kept = legacy(date, '10:00', { booking_request_id: crypto.randomUUID() });
+  const response = await book({ requestId: kept.booking_request_id, serviceId: 'beard-trim-shape', date, time: '10:00', paymentMethod: 'cash', ...customer({ email: kept.customer_email }) });
+  assert.equal(response.status, 200, JSON.stringify(response.body)); assert.equal(response.body.booking.priceCents, 2250);
+  assert.equal(appointment(kept.id).status, 'confirmed'); assert.equal(slotTimes(kept.id).length, 6);
+  assert.equal(heldFor(kept.id)?.status, 'held', 'held for staff instead');
+  const again = await book({ requestId: kept.booking_request_id, serviceId: 'beard-trim-shape', date, time: '10:00', paymentMethod: 'cash', ...customer({ email: kept.customer_email }) });
+  assert.equal(again.status, 200, 'a second retry still confirms'); assert.equal(appointment(kept.id).status, 'confirmed');
+});
+await check('R17 a walk-in for a service Bookly cannot map is refused before anything is saved', async () => {
+  markFresh(); const date = openDay();
+  delete mappedServices.haircut;
+  const id = crypto.randomUUID();
+  const response = await operation({ action: 'walk_in', id, serviceId: 'haircut', date, time: '10:00', name: 'Walk In', notes: '' });
+  assert.equal(response.status, 409); assert.match(response.body.error, /Nothing was saved/);
+  assert.equal(appointment(id), undefined);
 });
 await check('R18 with the bridge on, a retired-service hold Bookly refuses is released without charging', async () => {
   markFresh(); const date = openDay();

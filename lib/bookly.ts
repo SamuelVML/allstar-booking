@@ -4,7 +4,7 @@
  */
 import { env } from "cloudflare:workers";
 import { z } from "zod";
-import { addMinutes, dateIsValid, getTodayInEindhoven, makeSlotKeys } from "@/lib/booking";
+import { addMinutes, BOOKLY_SERVICE_MAP, dateIsValid, getTodayInEindhoven, makeSlotKeys, SERVICES } from "@/lib/booking";
 import { recordRefundDue, refundCancelledBooking, retryDueRefunds } from "@/lib/refunds";
 import type { ManagedBooking } from "@/lib/booking-management";
 import { backgroundBudget, meteredDatabase, SubrequestBudget, SubrequestBudgetExhausted } from "@/lib/subrequest-budget";
@@ -14,6 +14,26 @@ const environment = () => env as unknown as BridgeEnv;
 export function booklyEnabled() { return environment().BOOKLY_SYNC_ENABLED === "true"; }
 export class BooklyUnavailable extends Error {}
 export class BooklyConflict extends BooklyUnavailable {}
+/** Bookly refused one record for a reason no retry can change (HTTP 422 from
+ * the bridge): the website key has no Bookly service, its duration differs
+ * from the Bookly service, or the record is invalid. Unlike an outage it is
+ * never retried automatically, and unlike a slot conflict it never cancels an
+ * existing booking: the record is held for staff, and only a hold created by
+ * the same request (`releaseRejectedHold`) is released. */
+export class BooklyRejected extends BooklyConflict {
+  constructor(readonly code: string, message: string) { super(message); }
+}
+/** Marks a command held for a permanent refusal (bookly_commands.error). */
+const REFUSED = "mapping";
+const refusalReason = (code: string) => code === "service_map"
+  ? "Service not mapped in Bookly. Change the booking to a current service, or cancel it, then keep the website version."
+  : code === "duration_map"
+    ? "Duration differs from Bookly. Change the booking to a current service, or cancel it, then keep the website version."
+    : `Bookly refused this record (${code}). Correct or cancel it, then keep the website version.`;
+/** Request paths that create a hold pass `releaseRejectedHold`: a hold Bookly
+ * refuses permanently is then released instead of held, so the customer is
+ * never left with a booking they were told failed. */
+export type PushOptions = { releaseRejectedHold?: boolean };
 
 /** Imported Bookly occupancy older than this is treated as unknown. Background
  * synchronization runs every minute (Worker Cron Trigger, plus the WordPress
@@ -138,6 +158,11 @@ export async function booklyRequest(route: string, input: unknown): Promise<unkn
       body, signal: AbortSignal.timeout(25_000) });
   } catch { throw new BooklyUnavailable("Bookly could not be reached. Refresh before retrying."); }
   if (response.status === 409) throw new BooklyConflict("The appointment changed in Bookly. Resolve the pending change before retrying.");
+  if (response.status === 422) {
+    let code = "refused";
+    try { code = /^([a-z_]{1,40}):/.exec(String((JSON.parse(await response.text()) as { message?: unknown }).message ?? ""))?.[1] ?? code; } catch { /* keep the generic code */ }
+    throw new BooklyRejected(code, "Bookly cannot take this service as it is set up (service or duration). Change the service or contact the shop.");
+  }
   if (!response.ok) throw new BooklyUnavailable("Bookly connection is temporarily unavailable.");
   const text = await response.text();
   if (text.length > 5_000_000) throw new BooklyUnavailable("Bookly response exceeds the safety limit.");
@@ -235,7 +260,7 @@ async function enqueueLocal(database: D1Database, localIds: string[] | null, tod
  * still held: a worker that lost it mid-request cannot overwrite the link a
  * replacement worker has since advanced.
  */
-async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget, lease?: string) {
+async function sendCommand(database: D1Database, row: CommandRow, budget?: SubrequestBudget, lease?: string, options: PushOptions = {}) {
   budget?.charge(1); // the Bookly request; its D1 writes are metered by the caller's handle
   try {
     const command = JSON.parse(row.payload) as Command;
@@ -281,7 +306,7 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
       await database.prepare("UPDATE bookly_commands SET error = 'conflict' WHERE id = ?").bind(row.id).run();
       throw new SubrequestBudgetExhausted("Subrequest budget reached; the next run settles the rejected command.");
     }
-    await settleRejectedCommand(database, row, JSON.parse(row.payload) as Command, lease);
+    await settleRejectedCommand(database, row, JSON.parse(row.payload) as Command, lease, error, options);
     throw error;
   }
 }
@@ -295,8 +320,11 @@ async function sendCommand(database: D1Database, row: CommandRow, budget?: Subre
  *   so it is not retried every run and blocks no unrelated command.
  * A command staff discarded while it was in flight is left as it is.
  * With a lease (background sync) every booking write is fenced on it.
+ * A permanent refusal (BooklyRejected) is never settled by cancelling or
+ * moving a booking: it is held, except a hold the calling request created
+ * (`releaseRejectedHold`), which is released like a slot conflict.
  */
-async function settleRejectedCommand(database: D1Database, row: CommandRow, command: Command, lease?: string) {
+async function settleRejectedCommand(database: D1Database, row: CommandRow, command: Command, lease?: string, rejection?: BooklyConflict, options: PushOptions = {}) {
   // Discarded by staff while in flight: Bookly changed nothing, nothing to settle.
   if ((await database.prepare("SELECT status FROM bookly_commands WHERE id=?").bind(row.id).first<{ status: string }>())?.status !== "pending") return;
   const fence = lease ? leaseFence(database, lease) : null;
@@ -308,18 +336,19 @@ async function settleRejectedCommand(database: D1Database, row: CommandRow, comm
       throw error;
     }
   };
-  if (command.kind === "appointment") {
+  const refused = rejection instanceof BooklyRejected;
+  if (command.kind === "appointment" && (!refused || options.releaseRejectedHold)) {
     const booking = await database.prepare("SELECT * FROM appointments WHERE id=?").bind(row.local_id).first<Row & { booking_request_id: string | null }>();
     if (booking && !command.expectedVersion && (booking.booking_request_id || booking.source === "walk_in") && booking.payment_status !== "paid") {
       if (await fenced([
         database.prepare("UPDATE appointments SET status='cancelled',revision=revision+1 WHERE id=? AND revision=?").bind(row.local_id, booking.revision),
         database.prepare("DELETE FROM appointment_slots WHERE appointment_id=? AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND revision=? AND status='cancelled')")
           .bind(row.local_id, row.local_id, booking.revision + 1),
-        database.prepare("UPDATE bookly_commands SET status='rejected',error='conflict' WHERE id=? AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND revision=?)")
-          .bind(row.id, row.local_id, booking.revision + 1),
+        database.prepare("UPDATE bookly_commands SET status='rejected',error=? WHERE id=? AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND revision=?)")
+          .bind(refused ? REFUSED : "conflict", row.id, row.local_id, booking.revision + 1),
       ]) && (await database.prepare("SELECT status FROM bookly_commands WHERE id=?").bind(row.id).first<{ status: string }>())?.status === "rejected") return;
     }
-    const move = booking && command.expectedVersion && await database.prepare(`SELECT * FROM booking_changes WHERE appointment_id=? AND revision=? AND action='reschedule' AND new_date=? AND new_time=?`)
+    const move = !refused && booking && command.expectedVersion && await database.prepare(`SELECT * FROM booking_changes WHERE appointment_id=? AND revision=? AND action='reschedule' AND new_date=? AND new_time=?`)
       .bind(booking.id, booking.revision, command.state.date, command.state.time)
       .first<{ id: string; revision: number; previous_date: string; previous_time: string; new_date: string; new_time: string }>();
     if (booking && move && booking.status === "confirmed" && booking.appointment_date === move.new_date && booking.start_time === move.new_time) {
@@ -345,8 +374,9 @@ async function settleRejectedCommand(database: D1Database, row: CommandRow, comm
   }
   const link = await database.prepare("SELECT remote_id FROM bookly_links WHERE local_id=?").bind(row.local_id).first<{ remote_id: string }>();
   await fenced([
-    database.prepare("UPDATE bookly_commands SET status='held',error='conflict' WHERE id=? AND status='pending'").bind(row.id),
-    recordConflict(database, row.local_id, "Bookly rejected this change. Choose which version to keep.", link ? { remoteId: link.remote_id, version: null } : undefined),
+    database.prepare("UPDATE bookly_commands SET status='held',error=? WHERE id=? AND status='pending'").bind(refused ? REFUSED : "conflict", row.id),
+    recordConflict(database, row.local_id, refused ? refusalReason((rejection as BooklyRejected).code) : "Bookly rejected this change. Choose which version to keep.",
+      link ? { remoteId: link.remote_id, version: null } : undefined),
   ]);
 }
 
@@ -412,7 +442,7 @@ async function refundWithin(budget: SubrequestBudget, raw: D1Database, booking: 
  * caller gets BooklyConflict. BooklyUnavailable leaves the command pending for
  * background replay. `localIds` limits the push; null pushes every change.
  */
-export async function pushBooklyChanges(database: D1Database, localIds: string[] | null) {
+export async function pushBooklyChanges(database: D1Database, localIds: string[] | null, options: PushOptions = {}) {
   if (!booklyEnabled()) return;
   const today = getTodayInEindhoven();
   // A pending command for the same record blocks a newer one (unique index),
@@ -429,14 +459,16 @@ export async function pushBooklyChanges(database: D1Database, localIds: string[]
     // A rejection settles that record only; the others are still delivered.
     let rejected: BooklyConflict | null = null;
     for (const row of pending) {
-      try { await sendCommand(database, row); }
+      try { await sendCommand(database, row, undefined, undefined, options); }
       catch (error) { if (error instanceof BooklyConflict) rejected = error; else throw error; }
     }
     if (rejected && localIds) throw rejected;
   }
   // A requested record held for reconciliation was not written to Bookly.
-  if (localIds && await database.prepare(`SELECT 1 FROM bookly_commands WHERE status='held' AND local_id IN (SELECT value FROM json_each(?)) LIMIT 1`)
-    .bind(JSON.stringify(localIds)).first()) throw new BooklyConflict("The appointment changed in Bookly. Staff must reconcile it before it can sync.");
+  const held = localIds && await database.prepare(`SELECT error FROM bookly_commands WHERE status='held' AND local_id IN (SELECT value FROM json_each(?))
+    ORDER BY (error = '${REFUSED}') LIMIT 1`).bind(JSON.stringify(localIds)).first<{ error: string | null }>();
+  if (held?.error === REFUSED) throw new BooklyRejected("held", "Bookly cannot take this booking as it is. It is held for staff.");
+  if (held) throw new BooklyConflict("The appointment changed in Bookly. Staff must reconcile it before it can sync.");
 }
 
 /** For committed staff changes: refunds and notifications must still run, so
@@ -684,15 +716,18 @@ export async function synchronizeBookly(raw: D1Database, budget: SubrequestBudge
     // Remaining budget after the held count, the sweep read and the success write.
     await drain(database, lease, cap, budget, 3);
     // Isolation is bounded: many held records suggest the calendars are
-    // diverging, so stop and let availability fail closed.
-    const held = await database.prepare(`SELECT COUNT(*) AS n FROM (SELECT local_id FROM bookly_commands WHERE status='held'
-      UNION SELECT local_id FROM bookly_conflicts WHERE resolution IS NULL)`)
-      .first<{ n: number }>();
+    // diverging, so stop and let availability fail closed. Records Bookly
+    // refused permanently (legacy services, see the activation report) do not
+    // count: they are listed for staff and say nothing about divergence.
+    const held = await database.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN local_id IN
+        (SELECT local_id FROM bookly_commands WHERE status='held' AND error='${REFUSED}') THEN 0 ELSE 1 END), 0) AS n
+      FROM (SELECT local_id FROM bookly_commands WHERE status='held' UNION SELECT local_id FROM bookly_conflicts WHERE resolution IS NULL)`)
+      .first<{ total: number; n: number }>();
     if ((held?.n ?? 0) > MAX_HELD_CONFLICTS) throw new BooklyConflict(`${held!.n} records are held for staff reconciliation; synchronization stops until they are resolved.`);
     // Due refunds of any origin, with backoff; the rest stay due for the next run.
     await retryDueRefunds(database, raw, budget, 20, 1);
     await database.prepare("UPDATE bookly_sync_state SET last_success=?,error=? WHERE id=1 AND lease=?")
-      .bind(snapshotRequestedAt,held?.n ? "held" : null,lease).run();
+      .bind(snapshotRequestedAt,held?.total ? "held" : null,lease).run();
   } catch (error) {
     if (error instanceof SubrequestBudgetExhausted) {
       await raw.prepare("UPDATE bookly_sync_state SET error='budget' WHERE id=1 AND lease=?").bind(lease).run();
@@ -740,8 +775,17 @@ export async function resolveBooklyConflict(database: D1Database, localId: strin
       const today = getTodayInEindhoven();
       const recreated = row ? exportableAppointment(row, undefined, today) : block ? exportableBlock(block, undefined, today) : null;
       statements.push(recreated ? mark : done);
+    } else if (!link) {
+      // Never accepted by Bookly (for example refused as unmapped). Kept as it
+      // is only while it still occupies a future time; a booking staff
+      // cancelled or that has passed has nothing left to write.
+      const row = localId.startsWith("block-") ? null : await database.prepare("SELECT * FROM appointments WHERE id=?").bind(localId).first<Row>();
+      const block = localId.startsWith("block-") ? await database.prepare("SELECT * FROM time_off WHERE id=?").bind(localId.slice(6)).first<TimeOffRow>() : null;
+      const today = getTodayInEindhoven();
+      const exported = row ? exportableAppointment(row, undefined, today) : block ? exportableBlock(block, undefined, today) : null;
+      statements.push(exported ? mark : done);
     } else {
-      if (link && version) statements.push(database.prepare("UPDATE bookly_links SET remote_version=?,local_digest='' WHERE local_id=?").bind(version, localId));
+      if (version) statements.push(database.prepare("UPDATE bookly_links SET remote_version=?,local_digest='' WHERE local_id=?").bind(version, localId));
       statements.push(mark);
     }
   } else {
@@ -764,4 +808,36 @@ export async function resolveBooklyConflict(database: D1Database, localId: strin
   }
   await database.batch(statements);
   return { ok: true as const };
+}
+
+export type UnmappableBooking = {
+  id: string; reference: string; date: string; time: string; status: string; paymentStatus: string;
+  serviceKey: string; serviceName: string; durationMinutes: number; priceCents: number;
+  booklyServiceId: number | null; booklyDurationMinutes: number | null; issue: "service_not_mapped" | "duration_differs";
+};
+/** Read-only pre-activation check (GET /api/admin/bookly?report=activation).
+ * Lists the future bookings the first synchronization would export that the
+ * bridge would refuse: a website key with no Bookly service (retired keys,
+ * colour add-on) or a duration that differs from the Bookly service. Bookly's
+ * duration is the D06 catalogue's (`SERVICES` mirrors it). Works with the
+ * bridge off, so staff can correct or cancel these bookings before enabling
+ * it; enabled, each one would be held for staff on the first run. */
+export async function booklyActivationReport(database: D1Database): Promise<UnmappableBooking[]> {
+  const today = getTodayInEindhoven();
+  const links = (await database.prepare("SELECT * FROM bookly_links WHERE kind='appointment'").all<Link>()).results;
+  const rows = (await database.prepare(`SELECT * FROM appointments WHERE source != 'bookly' AND appointment_date >= ?
+    AND status IN ('confirmed','payment_pending') ORDER BY appointment_date, start_time`).bind(today).all<Row>()).results;
+  const report: UnmappableBooking[] = [];
+  for (const row of rows) {
+    const state = exportableAppointment(row, links.find(link => link.local_id === row.id), today);
+    if (!state) continue;
+    const booklyServiceId = BOOKLY_SERVICE_MAP[state.serviceId] ?? null;
+    const booklyDurationMinutes = SERVICES.find(service => service.id === state.serviceId)?.durationMinutes ?? null;
+    const issue = booklyServiceId === null ? "service_not_mapped" : booklyDurationMinutes !== state.durationMinutes ? "duration_differs" : null;
+    if (!issue) continue;
+    report.push({ id: row.id, reference: row.reference, date: row.appointment_date, time: row.start_time, status: row.status, paymentStatus: row.payment_status,
+      serviceKey: state.serviceId, serviceName: row.service_name, durationMinutes: row.duration_minutes, priceCents: row.price_cents,
+      booklyServiceId, booklyDurationMinutes, issue });
+  }
+  return report;
 }

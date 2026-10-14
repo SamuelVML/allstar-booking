@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation, getStaffUser } from "@/lib/staff-auth";
-import { booklyEnabled } from "@/lib/bookly";
+import { booklyActivationReport, booklyEnabled } from "@/lib/bookly";
 import { MAX_REFUND_ATTEMPTS } from "@/lib/refunds";
 import { attentionItems, resolveNotification } from "@/lib/staff-attention";
 
@@ -13,8 +13,12 @@ const headers = { "Cache-Control": "private, no-store" };
  * held while the bridge was on is still unresolved after it is turned off. */
 export async function GET(request: Request) {
   if (!await getStaffUser(request.headers)) return Response.json({ error: "Not authorised." }, { status: 403, headers });
-  const items = await attentionItems(getD1(), MAX_REFUND_ATTEMPTS, !booklyEnabled());
-  return Response.json({ ...items, calendar: { enabled: booklyEnabled(), ...items.calendar } }, { headers });
+  const database = getD1();
+  const items = await attentionItems(database, MAX_REFUND_ATTEMPTS, !booklyEnabled());
+  // Future bookings Bookly would refuse; correct or cancel them before the
+  // bridge is enabled (each would otherwise be held on the first run).
+  const unmappable = await booklyActivationReport(database);
+  return Response.json({ ...items, calendar: { enabled: booklyEnabled(), ...items.calendar, unmappable } }, { headers });
 }
 
 const schema = z.object({

@@ -178,6 +178,14 @@ final class AllStar_Bookly_Bridge {
         throw new RuntimeException($code . ':' . $message, $status);
     }
 
+    /** A refusal no retry can change (unmapped service, duration that differs
+     * from Bookly, invalid record). 422, never 503: the Worker holds that one
+     * record for staff instead of treating Bookly as unavailable and retrying
+     * it on every run. */
+    private static function refuse($code, $message) {
+        self::fail($code, $message, 422);
+    }
+
     public static function catalogue($request) {
         global $wpdb;
         return self::response(array('staff' => $wpdb->get_results("SELECT id, full_name FROM {$wpdb->prefix}bookly_staff", ARRAY_A),
@@ -237,7 +245,7 @@ final class AllStar_Bookly_Bridge {
 
     private static function mappedService($slug) {
         $id = self::serviceMap()[$slug] ?? null;
-        if (!$id || !\Bookly\Lib\Entities\Service::find((int)$id)) { self::fail('service_map', 'Service has not been mapped.', 503); }
+        if (!$id || !\Bookly\Lib\Entities\Service::find((int)$id)) { self::refuse('service_map', 'Service has not been mapped.'); }
         return (int)$id;
     }
 
@@ -307,7 +315,7 @@ final class AllStar_Bookly_Bridge {
         $input = $request->get_json_params();
         if (!is_array($input) || !preg_match('/^[a-zA-Z0-9-]{1,100}$/D', $input['id'] ?? '')
             || !preg_match('/^[a-zA-Z0-9-]{1,100}$/D', $input['localId'] ?? '')) {
-            return new WP_Error('bridge_input', 'Invalid command.', array('status' => 400));
+            return new WP_Error('bridge_input', 'input:Invalid command.', array('status' => 422));
         }
         $tables = array('bookly_appointments', 'bookly_customer_appointments', 'bookly_customers',
             'allstar_bridge_links', 'allstar_bridge_commands');
@@ -345,7 +353,7 @@ final class AllStar_Bookly_Bridge {
         global $wpdb;
         $block = ($input['kind'] ?? '') === 'block';
         $state = $input['state'] ?? array();
-        if (!is_array($state) || !in_array($state['status'] ?? '', array('confirmed','payment_pending','payment_expired','cancelled','completed','removed'), true)) { self::fail('input', 'Invalid state.', 400); }
+        if (!is_array($state) || !in_array($state['status'] ?? '', array('confirmed','payment_pending','payment_expired','cancelled','completed','removed'), true)) { self::refuse('input', 'Invalid state.'); }
         $link = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}allstar_bridge_links WHERE local_id = %s", $input['localId']), ARRAY_A);
         $appointment = $link ? \Bookly\Lib\Entities\Appointment::find((int)$link['appointment_id']) : null;
         $ca = $link ? \Bookly\Lib\Entities\CustomerAppointment::find((int)$link['ca_id']) : null;
@@ -369,9 +377,9 @@ final class AllStar_Bookly_Bridge {
         if (!$link && $terminal) { return array('remoteId' => null, 'version' => '', 'terminal' => true); }
         if (!self::validDate($state['date'] ?? '') || !preg_match('/^([01]\d|2[0-3]):[0-5][05]$/D', $state['time'] ?? '')
             || !is_int($state['durationMinutes'] ?? null) || $state['durationMinutes'] < 5 || $state['durationMinutes'] > 1440
-            || !is_int($state['handlingMinutes'] ?? null) || $state['handlingMinutes'] < 0 || $state['handlingMinutes'] > 120) { self::fail('input', 'Invalid appointment time.', 400); }
+            || !is_int($state['handlingMinutes'] ?? null) || $state['handlingMinutes'] < 0 || $state['handlingMinutes'] > 120) { self::refuse('input', 'Invalid appointment time.'); }
         $service_id = $block ? null : self::mappedService($state['serviceId'] ?? '');
-        if (!$block && (int)\Bookly\Lib\Entities\Service::find($service_id)->getDuration() !== $state['durationMinutes'] * 60) { self::fail('duration_map', 'Bookly service duration does not match the website service.', 503); }
+        if (!$block && (int)\Bookly\Lib\Entities\Service::find($service_id)->getDuration() !== $state['durationMinutes'] * 60) { self::refuse('duration_map', 'Bookly service duration does not match the website service.'); }
         $start = $state['date'] . ' ' . $state['time'] . ':00';
         $end = self::end($start, $state['durationMinutes']);
         $moved = !$appointment || $appointment->getStartDate() !== $start || $appointment->getEndDate() !== $end;

@@ -1,4 +1,4 @@
-import { assertBooklyFresh, BooklyConflict, BooklyUnavailable, booklyEnabled, pushAfterCommit, pushBooklyChanges } from "@/lib/bookly";
+import { assertBooklyFresh, BooklyConflict, BooklyRejected, BooklyUnavailable, booklyEnabled, pushAfterCommit, pushBooklyChanges } from "@/lib/bookly";
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation } from "@/lib/staff-auth";
@@ -118,8 +118,10 @@ export async function POST(request: Request) {
       await createWalkIn(database, input, user.id, stored);
       // Success only once Bookly has accepted the walk-in. A Bookly booking that
       // took the slot after the live check makes the bridge release the walk-in.
-      try { await pushBooklyChanges(database, [input.id]); }
+      // A service Bookly refuses permanently releases the walk-in as well.
+      try { await pushBooklyChanges(database, [input.id], { releaseRejectedHold: true }); }
       catch (error) {
+        if (error instanceof BooklyRejected) throw new BookingConflict("Bookly cannot take this service as it is set up. The walk-in was not added.");
         if (error instanceof BooklyConflict) throw new BookingConflict("That time was just booked in Bookly. The walk-in was not added.");
         if (error instanceof BooklyUnavailable) {
           return Response.json({ error: "Bookly has not confirmed this walk-in yet. The time stays reserved and syncs automatically; refresh before adding it again." }, { status: 503 });
@@ -152,6 +154,8 @@ export async function POST(request: Request) {
     return Response.json({ saved: true, calendar });
   } catch (error) {
     if (error instanceof BookingConflict) return Response.json({ error: error.message }, { status: 409 });
+    // Refused by Bookly before anything was saved (availability check).
+    if (error instanceof BooklyRejected) return Response.json({ error: "Bookly cannot take this service as it is set up. Nothing was saved." }, { status: 409 });
     console.error("Backstage operation failed");
     return Response.json({ error: "Unable to save. Refresh to check whether it was saved before retrying." }, { status: 503 });
   }
