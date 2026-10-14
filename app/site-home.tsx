@@ -29,7 +29,7 @@ export default function SiteHome({
 }) {
   const [language, setLanguage] = useState<Language>(initialLanguage);
   const t = COPY[language];
-  const bookable = SERVICES.filter((service) => !service.isAddOn);
+  const bookable = SERVICES;
 
   function bookHref(serviceId?: string) {
     const params = new URLSearchParams();
@@ -106,9 +106,6 @@ export default function SiteHome({
             </a>
           ))}
         </div>
-        <p className="muted" style={{ margin: "14px 0 0", fontSize: 13 }}>
-          {t.addOnNote}
-        </p>
       </section>
 
       <section className="section section-tight">

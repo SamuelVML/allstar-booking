@@ -209,7 +209,7 @@ await backstage.recordPayment(database,receipt,'staff-id');
 await assert.rejects(backstage.recordPayment(database,receipt,'staff-id'),/Already paid/);
 await assert.rejects(backstage.recordPayment(database,{...receipt,id:crypto.randomUUID(),revision:row(walkId).revision},'staff-id'),/Already paid/);
 assert.equal(row(walkId).payment_status,'paid'); assert.equal(row(walkId).payment_method,'card');
-assert.equal(db.prepare('SELECT amount_cents FROM payment_receipts WHERE appointment_id=?').get(walkId).amount_cents,3500);
+assert.equal(db.prepare('SELECT amount_cents FROM payment_receipts WHERE appointment_id=?').get(walkId).amount_cents,3350, 'a walk-in is priced from the Bookly catalogue (D06)');
 assert.equal(db.prepare('SELECT count(*) AS n FROM payment_receipts WHERE appointment_id=?').get(walkId).n,1);
 await assert.rejects(backstage.recordPayment(database,{id:crypto.randomUUID(),reference:'paid',revision:row('paid').revision,method:'cash'},'staff-id'),/Already paid/);
 // A time-off block wins between the walk-in availability read and its transaction.

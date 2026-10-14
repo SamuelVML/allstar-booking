@@ -1,9 +1,13 @@
 export type BarberService = {
   id: string;
+  /** English display name; stored on new appointments as `service_name`. */
   name: string;
   durationMinutes: number;
   priceCents: number;
-  isAddOn?: boolean;
+  /** Bookly service this website service is, one to one (owner decision D06). */
+  booklyServiceId: number;
+  /** The service title exactly as Bookly holds it (trimmed). */
+  booklyName: string;
 };
 
 export type OpeningPeriod = { start: string; end: string };
@@ -18,17 +22,53 @@ export type BookingSettings = {
   loyaltyRewardPoints: number;
 };
 
-export const SERVICES: BarberService[] = [
-  { id: "haircut", name: "Haircut", durationMinutes: 30, priceCents: 3500 },
-  { id: "student-haircut", name: "Student haircut", durationMinutes: 30, priceCents: 3000 },
-  { id: "kids-haircut", name: "Kids haircut", durationMinutes: 30, priceCents: 2750 },
-  { id: "line-up", name: "Line-up", durationMinutes: 15, priceCents: 1750 },
-  { id: "beard-trim-shape", name: "Beard trim & shape", durationMinutes: 20, priceCents: 2250 },
-  { id: "haircut-beard", name: "Haircut + beard", durationMinutes: 45, priceCents: 4750 },
-  { id: "haircut-colour", name: "Haircut + colour", durationMinutes: 60, priceCents: 5500 },
-  { id: "haircut-beard-colour", name: "Haircut + beard + colour", durationMinutes: 75, priceCents: 6750 },
-  { id: "colour-add-on", name: "Colour add-on", durationMinutes: 30, priceCents: 2250, isAddOn: true },
-];
+/**
+ * The bookable catalogue. Owner decision D06 (2026-10-14): Bookly is the
+ * authoritative source for prices and durations, so every entry mirrors one
+ * Bookly service as read on 2026-10-14
+ * (`docs/release-cutover/bookly-catalogue-2026-10-14.json`). Distinct Bookly
+ * services stay distinct even where durations match, and there are no add-on
+ * combinations: Bookly has no extras configured. Change an entry only after
+ * Bookly itself changes, and update the mapping contract with it
+ * (`docs/release-cutover/service-mapping-contract.md`).
+ */
+export const SERVICES: readonly BarberService[] = Object.freeze([
+  { id: "haircut", name: "Haircut", durationMinutes: 30, priceCents: 3350, booklyServiceId: 1, booklyName: "Hair cut" },
+  { id: "line-up", name: "Line-up (shape-up)", durationMinutes: 15, priceCents: 1700, booklyServiceId: 2, booklyName: "Line up (Shape up) Contouren" },
+  { id: "beard-shape", name: "Beard shape (model)", durationMinutes: 15, priceCents: 2000, booklyServiceId: 4, booklyName: "Beard Shape (model)" },
+  { id: "line-up-beard-shave", name: "Line-up & beard shave", durationMinutes: 15, priceCents: 2250, booklyServiceId: 13, booklyName: "Line up & Beard shave" },
+  { id: "line-up-beard-model", name: "Line-up & beard model", durationMinutes: 30, priceCents: 2800, booklyServiceId: 14, booklyName: "Line up & Beard model" },
+  { id: "line-up-beard-model-colour", name: "Line-up, beard model & hair colour", durationMinutes: 30, priceCents: 4450, booklyServiceId: 16, booklyName: "Line up, beard model & hair color" },
+  { id: "haircut-colour", name: "Haircut & hair colour", durationMinutes: 60, priceCents: 5000, booklyServiceId: 17, booklyName: "Hair cut & hair color" },
+  { id: "haircut-beard-trim", name: "Haircut & beard trim or shave", durationMinutes: 40, priceCents: 3800, booklyServiceId: 18, booklyName: "Hair cut & Beard trim or shave" },
+  { id: "haircut-beard-shape", name: "Haircut & beard shape", durationMinutes: 40, priceCents: 4000, booklyServiceId: 19, booklyName: "Hair cut & Beard shape" },
+  { id: "haircut-beard-shape-colour", name: "Haircut, beard shape & hair colour", durationMinutes: 60, priceCents: 5500, booklyServiceId: 20, booklyName: "Hair cut, Beard shape & Hair color" },
+  { id: "kids-haircut", name: "Kids haircut (4–15 years)", durationMinutes: 30, priceCents: 2750, booklyServiceId: 21, booklyName: "Kids (4-15 years)" },
+  { id: "toddler-haircut", name: "Toddler haircut (0–3 years)", durationMinutes: 30, priceCents: 2500, booklyServiceId: 22, booklyName: "Enfants (0 - 3 years)" },
+  { id: "kids-haircut-x2", name: "Two kids haircuts (4–15 years)", durationMinutes: 50, priceCents: 5500, booklyServiceId: 23, booklyName: "Kids x2 (4-15 years)" },
+  { id: "student-haircut", name: "Student haircut (16+)", durationMinutes: 40, priceCents: 3350, booklyServiceId: 26, booklyName: "Hair cut Student 16 years +" },
+].map((service) => Object.freeze(service)));
+
+/**
+ * Website key → Bookly service ID, derived from `SERVICES`. The WordPress
+ * bridge ships the same map (`integrations/bookly/allstar-bookly-bridge/service-map.json`);
+ * `tests/catalogue-consistency.mjs` keeps the two identical.
+ */
+export const BOOKLY_SERVICE_MAP: Readonly<Record<string, number>> = Object.freeze(
+  Object.fromEntries(SERVICES.map((service) => [service.id, service.booklyServiceId])),
+);
+
+/**
+ * Service keys the website sold before D06. Read-only: appointments that
+ * carry them keep their stored name, duration and price, and these keys are
+ * never bookable or priced again (`getService` does not know them).
+ */
+export const LEGACY_SERVICE_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  "beard-trim-shape": "Beard trim & shape",
+  "haircut-beard": "Haircut + beard",
+  "haircut-beard-colour": "Haircut + beard + colour",
+  "colour-add-on": "Colour add-on",
+});
 
 export const OPENING_HOURS: Record<number, { start: string; end: string } | null> = {
   0: null,

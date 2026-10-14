@@ -25,11 +25,10 @@ export async function GET(request: Request) {
     const date = url.searchParams.get("date") ?? "";
     const serviceId = url.searchParams.get("service") ?? "";
     const service = getService(serviceId);
-    const colourAddOn =
-      url.searchParams.get("addOn") === "colour" &&
-      !service?.id.includes("colour");
+    // Owner decision D06: no add-on combinations; each service is one Bookly service.
+    const addOnRequested = url.searchParams.has("addOn");
 
-    if (!service || service.isAddOn || (date && !dateIsValid(date))) {
+    if (!service || addOnRequested || (date && !dateIsValid(date))) {
       return Response.json({ error: "Choose a valid service and date." }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
@@ -57,7 +56,7 @@ export async function GET(request: Request) {
     const appointmentSlots = new Set(
       rows.results.filter((row) => row.kind === "appointment").map((row) => row.slot_start),
     );
-    const durationMinutes = service.durationMinutes + (colourAddOn ? 30 : 0);
+    const durationMinutes = service.durationMinutes;
 
     if (!date) {
       const availableDays = [];
@@ -74,7 +73,7 @@ export async function GET(request: Request) {
         );
         if (times.length > 0) availableDays.push({ date: candidateDate, times });
       }
-      const filteredDays = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, availableDays);
+      const filteredDays = await filterBooklyTimes(service.id, durationMinutes + settings.handlingBufferMinutes, availableDays);
       const recommendations = rankRecommendations({
         availableDays: filteredDays,
         occupiedSlots: appointmentSlots,
@@ -97,7 +96,7 @@ export async function GET(request: Request) {
     }
 
     const localTimes = buildAvailableTimes(date, durationMinutes, occupied, settings.handlingBufferMinutes, settings.onlineLeadMinutes, now, settings);
-    const filtered = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, [{ date, times: localTimes }]);
+    const filtered = await filterBooklyTimes(service.id, durationMinutes + settings.handlingBufferMinutes, [{ date, times: localTimes }]);
     return Response.json({
       date,
       service: service.id,

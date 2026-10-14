@@ -8,8 +8,11 @@
  * Install on a backed-up staging copy first. This does not replace Access,
  * payment-provider verification or tests against the actual WordPress database.
  * No Bookly vendor file is modified. Configure ALLSTAR_BOOKLY_SECRET (at least
- * 32 characters), ALLSTAR_BOOKLY_STAFF_ID and ALLSTAR_BOOKLY_SERVICES in wp-config.php.
- * Services is an associative array: website service slug => Bookly service ID.
+ * 32 characters) and ALLSTAR_BOOKLY_STAFF_ID in wp-config.php.
+ * The service map (website service slug => Bookly service ID) ships with the
+ * plugin in service-map.json, generated from the Worker catalogue (owner
+ * decision D06). ALLSTAR_BOOKLY_SERVICES is optional; when defined it must
+ * equal the bundled map exactly, or the bridge refuses every request.
  */
 if (!defined('ABSPATH')) { exit; }
 
@@ -78,6 +81,36 @@ final class AllStar_Bookly_Bridge {
             $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $name));
         });
     }
+    /**
+     * Website service slug => Bookly service ID, one to one. Returns null when
+     * the bundled map is missing or malformed, is not one to one, or differs
+     * from an ALLSTAR_BOOKLY_SERVICES override, so the bridge fails closed.
+     */
+    public static function serviceMap() {
+        static $map = false;
+        if ($map !== false) { return $map; }
+        $map = null;
+        $raw = @file_get_contents(__DIR__ . '/service-map.json');
+        $decoded = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($decoded) || !isset($decoded['services']) || !is_array($decoded['services']) || !$decoded['services']) { return $map; }
+        $bundled = array();
+        foreach ($decoded['services'] as $slug => $id) {
+            if (!is_string($slug) || $slug === '' || !is_int($id) || $id <= 0) { return $map; }
+            $bundled[$slug] = $id;
+        }
+        if (count(array_unique($bundled)) !== count($bundled)) { return $map; }
+        ksort($bundled);
+        if (defined('ALLSTAR_BOOKLY_SERVICES')) {
+            if (!is_array(ALLSTAR_BOOKLY_SERVICES)) { return $map; }
+            $override = array();
+            foreach (ALLSTAR_BOOKLY_SERVICES as $slug => $id) { $override[(string)$slug] = is_int($id) ? $id : -1; }
+            ksort($override);
+            if ($override !== $bundled) { return $map; }
+        }
+        $map = $bundled;
+        return $map;
+    }
+
     public static function adminMenu() {
         add_management_page('All Star Bookly Bridge', 'All Star Bookly Bridge', 'manage_options', 'allstar-bookly-bridge', array(__CLASS__, 'adminPage'));
     }
@@ -85,7 +118,7 @@ final class AllStar_Bookly_Bridge {
         if (!current_user_can('manage_options')) { return; }
         global $wpdb;
         echo '<div class="wrap"><h1>All Star Bookly Bridge</h1><p>The Bookly interface stays unchanged. Configure the staff and service IDs below in wp-config.php before enabling the Worker.</p>';
-        echo '<p>Configuration: ' . (defined('ALLSTAR_BOOKLY_SECRET') && defined('ALLSTAR_BOOKLY_STAFF_ID') && defined('ALLSTAR_BOOKLY_SERVICES') ? 'present' : 'incomplete') . '</p>';
+        echo '<p>Configuration: ' . (defined('ALLSTAR_BOOKLY_SECRET') && defined('ALLSTAR_BOOKLY_STAFF_ID') && self::serviceMap() !== null ? 'present' : 'incomplete') . '</p>';
         echo '<h2>Staff</h2><table class="widefat"><tr><th>ID</th><th>Name</th></tr>';
         foreach ($wpdb->get_results("SELECT id,full_name FROM {$wpdb->prefix}bookly_staff", ARRAY_A) as $row) {
             echo '<tr><td>' . esc_html($row['id']) . '</td><td>' . esc_html($row['full_name']) . '</td></tr>';
@@ -109,8 +142,8 @@ final class AllStar_Bookly_Bridge {
     public static function authorize($request) {
         global $wpdb;
         if (!defined('ALLSTAR_BOOKLY_SECRET') || strlen(ALLSTAR_BOOKLY_SECRET) < 32
-            || !defined('ALLSTAR_BOOKLY_STAFF_ID') || !defined('ALLSTAR_BOOKLY_SERVICES')
-            || !is_array(ALLSTAR_BOOKLY_SERVICES) || !class_exists('Bookly\\Lib\\Utils\\Appointment')
+            || !defined('ALLSTAR_BOOKLY_STAFF_ID') || self::serviceMap() === null
+            || !class_exists('Bookly\\Lib\\Utils\\Appointment')
             || !class_exists('BooklyPro\\Lib\\Plugin')) {
             return new WP_Error('bridge_unconfigured', 'Bridge is not configured.', array('status' => 503));
         }
@@ -149,7 +182,7 @@ final class AllStar_Bookly_Bridge {
         global $wpdb;
         return self::response(array('staff' => $wpdb->get_results("SELECT id, full_name FROM {$wpdb->prefix}bookly_staff", ARRAY_A),
             'services' => $wpdb->get_results("SELECT id, title, duration, price FROM {$wpdb->prefix}bookly_services", ARRAY_A),
-            'configuredStaff' => (int)ALLSTAR_BOOKLY_STAFF_ID, 'serviceMap' => ALLSTAR_BOOKLY_SERVICES));
+            'configuredStaff' => (int)ALLSTAR_BOOKLY_STAFF_ID, 'serviceMap' => self::serviceMap()));
     }
 
     private static function rows() {
@@ -177,7 +210,7 @@ final class AllStar_Bookly_Bridge {
     }
 
     private static function shape($row) {
-        $reverse = array_flip(ALLSTAR_BOOKLY_SERVICES);
+        $reverse = array_flip(self::serviceMap());
         $status_map = array('approved' => 'confirmed', 'pending' => 'payment_pending', 'done' => 'completed', 'cancelled' => 'cancelled', 'rejected' => 'cancelled', 'waitlisted' => 'waitlisted');
         if (!isset($status_map[$row['status']])) { self::fail('custom_status', 'Map custom Bookly statuses before enabling sync.', 503); }
         $version = hash('sha256', wp_json_encode($row));
@@ -203,7 +236,7 @@ final class AllStar_Bookly_Bridge {
     }
 
     private static function mappedService($slug) {
-        $id = ALLSTAR_BOOKLY_SERVICES[$slug] ?? null;
+        $id = self::serviceMap()[$slug] ?? null;
         if (!$id || !\Bookly\Lib\Entities\Service::find((int)$id)) { self::fail('service_map', 'Service has not been mapped.', 503); }
         return (int)$id;
     }

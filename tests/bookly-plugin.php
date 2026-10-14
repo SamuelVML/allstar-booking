@@ -4,7 +4,14 @@ namespace Bookly\Lib\Utils { class Appointment { public static $checks = array()
 namespace BooklyPro\Lib { class Plugin {} }
 namespace {
 define('ABSPATH', '/tmp/'); define('DAY_IN_SECONDS', 86400);
-define('ALLSTAR_BOOKLY_SECRET', str_repeat('x',40)); define('ALLSTAR_BOOKLY_STAFF_ID',5); define('ALLSTAR_BOOKLY_SERVICES',array('haircut'=>1));
+define('ALLSTAR_BOOKLY_SECRET', str_repeat('x',40)); define('ALLSTAR_BOOKLY_STAFF_ID',5);
+// The service map ships with the plugin (service-map.json). An optional
+// wp-config override must equal it exactly: ALLSTAR_TEST_SERVICE_OVERRIDE=match
+// runs every check with an identical override; =mismatch checks fail-closed.
+$bundledServices = json_decode(file_get_contents(__DIR__.'/../integrations/bookly/allstar-bookly-bridge/service-map.json'), true)['services'];
+$overrideMode = getenv('ALLSTAR_TEST_SERVICE_OVERRIDE') ?: 'none';
+if ($overrideMode === 'match') { define('ALLSTAR_BOOKLY_SERVICES', array_reverse($bundledServices, true)); }
+if ($overrideMode === 'mismatch') { define('ALLSTAR_BOOKLY_SERVICES', array('haircut'=>1)); }
 class WP_Error { public $code,$message,$data; public function __construct($c,$m,$d){$this->code=$c;$this->message=$m;$this->data=$d;} }
 class WP_REST_Response { public $data,$headers=array(); public function __construct($d){$this->data=$d;} public function header($k,$v){$this->headers[$k]=$v;} }
 class TestRequest {
@@ -29,6 +36,20 @@ function wp_date($format,$time){return date($format,$time);} function sanitize_t
 define('ARRAY_A','ARRAY_A');
 require __DIR__.'/../integrations/bookly/allstar-bookly-bridge/allstar-bookly-bridge.php';
 function check($condition,$message){if(!$condition)throw new \RuntimeException($message);}
+if ($overrideMode === 'mismatch') {
+ check(AllStar_Bookly_Bridge::serviceMap()===null,'a differing override disables the map');
+ $refused=AllStar_Bookly_Bridge::authorize(new TestRequest('snapshot',array()));
+ check($refused instanceof WP_Error && $refused->code==='bridge_unconfigured' && $refused->data['status']===503,'a differing override fails closed');
+ echo "PASS: a wp-config service map that differs from the bundled map fails closed\n"; exit(0);
+}
+$map=AllStar_Bookly_Bridge::serviceMap(); ksort($bundledServices);
+check($map===$bundledServices,'the bridge uses the bundled one-to-one service map');
+check(count(array_unique($map))===count($map),'one Bookly service per website key');
+$mapped=new ReflectionMethod('AllStar_Bookly_Bridge','shape');
+$shaped=$mapped->invoke(null,array('ca_id'=>9,'local_id'=>null,'kind'=>null,'service_id'=>26,'service_name'=>'Hair cut Student 16 years +','custom_service_name'=>null,
+ 'start_date'=>'2026-11-03 10:00:00','end_date'=>'2026-11-03 10:40:00','extras_duration'=>0,'padding_left'=>0,'padding_right'=>0,'status'=>'approved',
+ 'customer_name'=>'N','customer_email'=>'n@example.test','customer_phone'=>'1','notes'=>'','price'=>'33.50','payment_status'=>'pending','participants'=>1));
+check($shaped['serviceId']==='student-haircut' && $shaped['priceCents']===3350 && $shaped['durationMinutes']===40,'a Bookly row maps back to its website key with Bookly price and duration');
 $unsigned=new TestRequest('snapshot',array());$unsigned->headers['x-allstar-signature']='bad';check(AllStar_Bookly_Bridge::authorize($unsigned)->data['status']===403,'invalid signature');
 $stale=new TestRequest('snapshot',array());$stale->headers['x-allstar-timestamp']=(string)(time()-300);$stale->sign();check(AllStar_Bookly_Bridge::authorize($stale)->data['status']===403,'expired request');
 $signed=new TestRequest('snapshot',array());check(AllStar_Bookly_Bridge::authorize($signed)===true,'valid signed request');check(AllStar_Bookly_Bridge::authorize($signed)->data['status']===403,'nonce replay');
@@ -44,5 +65,5 @@ check($free->invoke(null,'2026-11-03','10:00',540,null)===true,'full day block i
 \Bookly\Lib\Utils\Appointment::$checks=array();$wpdb->busy=99;
 check($free->invoke(null,'2026-11-03','10:00',40,1)===false,'active overlap blocks booking');
 check(str_contains(end($wpdb->queries),"NOT IN ('cancelled','rejected','waitlisted')"),'terminal participants do not occupy time');
-echo "PASS: PHP syntax/runtime, HMAC expiry and replay, idempotent commands, altered-payload refusal, staff schedule and full-day blocks\n";
+echo "PASS: PHP syntax/runtime, bundled service map ($overrideMode override), HMAC expiry and replay, idempotent commands, altered-payload refusal, staff schedule and full-day blocks\n";
 }
