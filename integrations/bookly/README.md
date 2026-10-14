@@ -29,21 +29,24 @@ The Worker feature is OFF unless `BOOKLY_SYNC_ENABLED=true`.
 2. Upload the `allstar-bookly-bridge` directory as a ZIP using WordPress
    Plugins → Add New → Upload Plugin, then activate it.
 3. Open WordPress Tools → All Star Bookly Bridge. Its tables list the actual
-   staff and service IDs. Select Amaury's staff ID and map every website service
-   to its corresponding Bookly service. Durations must match exactly. Add-on
-   combinations need their own mapping, for example `haircut+colour`.
+   staff and service IDs. Confirm Amaury's staff ID and that every service in
+   `allstar-bookly-bridge/service-map.json` exists with the price and duration
+   in `docs/release-cutover/service-mapping-contract.md`. The service map ships
+   with the plugin and is generated from the Worker catalogue (owner decision
+   D06: Bookly is authoritative for prices and durations). It is one to one;
+   there are no add-on combinations. Do not edit it by hand: change Bookly,
+   update `lib/booking.ts`, then run `node scripts/bookly-service-map.mjs`.
 4. In staging `wp-config.php`, before WordPress's bootstrap, define:
 
    ```php
    define('ALLSTAR_BOOKLY_SECRET', 'YOUR_RANDOM_SECRET_AT_LEAST_32_CHARACTERS');
    define('ALLSTAR_BOOKLY_STAFF_ID', YOUR_ACTUAL_STAFF_ID);
-   define('ALLSTAR_BOOKLY_SERVICES', array(
-       'haircut' => YOUR_ACTUAL_HAIRCUT_SERVICE_ID,
-       // Map the other website services and any +colour combinations here.
-   ));
    define('ALLSTAR_WORKER_SYNC_URL', 'https://YOUR_TEST_WORKER/api/bookly/sync');
    ```
 
+   `ALLSTAR_BOOKLY_SERVICES` is no longer needed. If it is defined, it must
+   equal the bundled map exactly; any difference makes the bridge refuse every
+   request (fail closed).
    Generate the secret locally, for example `openssl rand -hex 32`. Keep it
    private. WordPress must use the `Europe/Amsterdam` named timezone.
 5. Deploy this branch to the TEST Worker with migration
@@ -66,7 +69,7 @@ The Worker feature is OFF unless `BOOKLY_SYNC_ENABLED=true`.
    `/api/admin/*` Access rules; they return no customer data.
 7. With a staff-authenticated test session, POST `{"action":"sync"}` to
    `/api/admin/bookly`, then GET that route to inspect last success/pending
-   commands. `{"action":"catalogue"}` reads mapped staff/services.
+   commands. `{"action":"catalogue"}` reads mapped staff/services and returns `verification`: any Bookly price, duration or map difference from the website catalogue (Bookly wins; update `lib/booking.ts`).
 
 ## Activation checks — required against real Bookly
 

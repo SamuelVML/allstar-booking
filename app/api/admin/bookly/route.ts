@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getD1 } from "@/db";
 import { authoriseStaffMutation, getStaffUser } from "@/lib/staff-auth";
+import { checkBooklyCatalogue } from "@/lib/bookly-catalogue";
 import { BOOKLY_MAX_OCCUPANCY_AGE_SECONDS, booklyEnabled, booklyOccupancyAgeSeconds, booklyRequest, resolveBooklyConflict, synchronizeBookly } from "@/lib/bookly";
 const headers = { "Cache-Control": "private, no-store" };
 export async function GET(request: Request) {
@@ -25,7 +26,11 @@ export async function POST(request: Request) {
       z.object({ action: z.literal("sync") }),
       z.object({ action: z.literal("resolve"), localId: z.string().min(1).max(120), keep: z.enum(["bookly", "local"]) }),
     ]).parse(await request.json());
-    if (input.action === "catalogue") return Response.json(await booklyRequest("catalogue", {}), { headers });
+    if (input.action === "catalogue") {
+      const catalogue = await booklyRequest("catalogue", {});
+      // Owner decision D06: Bookly is authoritative; report any website drift.
+      return Response.json({ ...(catalogue as object), verification: checkBooklyCatalogue(catalogue) }, { headers });
+    }
     if (input.action === "resolve") {
       const resolved = await resolveBooklyConflict(getD1(), input.localId, input.keep);
       if (!resolved.ok) return Response.json({ error: resolved.error }, { status: 409, headers });
