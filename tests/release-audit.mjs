@@ -46,7 +46,7 @@ const env = { BOOKLY_SYNC_ENABLED: 'true', BOOKLY_BRIDGE_URL: 'https://wp.exampl
   BOOKLY_SUBREQUEST_BUDGET: '900', RESEND_API_KEY: 're_test', BOOKING_EMAIL_FROM: 'All Star <bookings@example.test>', BOOKING_BUSINESS_NAME: 'All Star', BOOKING_ADMIN_EMAIL: '' };
 const remote = new Map(); const receipts = new Map(); let nextId = 500;
 const calls = { snapshot: 0, availability: 0, command: 0 };
-let commandsDown = false; let beforeCommand = null; const commandLog = [];
+let commandsDown = false; let bridgeDown = false; let beforeCommand = null; const commandLog = [];
 const minutes = t => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
 const clock = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const active = row => ['confirmed', 'payment_pending', 'completed'].includes(row.status);
@@ -62,6 +62,7 @@ async function bridgeFetch(url, options) {
   const route = new URL(url).pathname.split('/').pop();
   const input = JSON.parse(options.body);
   calls[route] += 1;
+  if (bridgeDown) throw new Error('connect ECONNREFUSED');
   if (route === 'snapshot') return Response.json({ complete: true, scopeFrom: '2000-01-01', appointments: [...remote.values()].map(row => ({ ...row })) });
   if (route === 'availability') {
     return Response.json({ days: input.days.map(day => ({ date: day.date, times: day.times.filter(time =>
@@ -89,10 +90,13 @@ async function bridgeFetch(url, options) {
 /* ------------------------------------------------------------ Stripe double */
 const stripeRefunds = new Map(); let stripeRefundCalls = 0; let stripeFailures = 0;
 const checkoutSessions = new Map(); const checkoutKeys = new Map(); let checkoutCreates = 0;
+// 'uncertain': the session is created but the response is lost; 'definite': Stripe rejects the request.
+let checkoutFailure = null; let afterCheckoutCreate = null;
 const stripe = {
   checkout: { sessions: {
     async retrieve(id) { const session = checkoutSessions.get(id); if (!session) throw new Error('No such session'); return session; },
     async create(params, options = {}) {
+      if (checkoutFailure === 'definite') { checkoutFailure = null; throw Object.assign(new Error('Invalid request'), { type: 'StripeInvalidRequestError', statusCode: 400 }); }
       const key = options.idempotencyKey;
       if (key && checkoutKeys.has(key)) {
         const previous = checkoutKeys.get(key);
@@ -104,8 +108,11 @@ const stripe = {
       checkoutCreates += 1;
       const session = { id: `cs_test_${checkoutCreates}`, url: `https://checkout.example.test/${checkoutCreates}`, metadata: params.metadata, payment_status: 'unpaid', payment_intent: `pi_${checkoutCreates}` };
       checkoutSessions.set(session.id, session); if (key) checkoutKeys.set(key, { params, session });
+      if (afterCheckoutCreate) { const hook = afterCheckoutCreate; afterCheckoutCreate = null; await hook(); }
+      if (checkoutFailure === 'uncertain') { checkoutFailure = null; throw Object.assign(new Error('Request timed out'), { type: 'StripeConnectionError' }); }
       return session;
-    } } },
+    },
+    async expire(id) { const session = checkoutSessions.get(id); session.status = 'expired'; session.url = null; return session; } } },
   refunds: { async create(params, options) {
     stripeRefundCalls += 1;
     if (stripeFailures > 0) { stripeFailures -= 1; throw new Error('Stripe is unavailable'); }
@@ -208,7 +215,8 @@ function reset() {
   db.prepare('UPDATE bookly_sync_state SET lease=NULL,lease_until=0,last_success=NULL,error=NULL WHERE id=1').run();
   remote.clear(); receipts.clear(); commandLog.length = 0; providerKeys.clear(); deliveries.length = 0; stripeRefunds.clear(); checkoutKeys.clear();
   stripeFailures = 0; stripeRefundCalls = 0; checkoutCreates = 0; resendConflicts = 0; resendFailures = 0; clockOffset = 0;
-  commandsDown = false; beforeCommand = null; beforeBatch = null; env.BOOKLY_SYNC_ENABLED = 'true';
+  commandsDown = false; bridgeDown = false; beforeCommand = null; beforeBatch = null; env.BOOKLY_SYNC_ENABLED = 'true'; env.BOOKLY_SUBREQUEST_BUDGET = '900';
+  checkoutFailure = null; afterCheckoutCreate = null; checkoutSessions.clear();
 }
 const results = []; let failures = 0;
 async function check(name, fn) {
@@ -513,6 +521,144 @@ await check('F8 a cash booking retry still confirms once (unchanged)', async () 
   const first = await book(body); assert.equal(first.status, 201);
   const second = await book(body); assert.equal(second.status, 200); assert.equal(second.body.booking.reference, first.body.booking.reference);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM appointments').get().n, 1);
+});
+
+/* ------------------------------------------- Codex re-review of PR #10 (cc783f2) */
+// R1 (migration) is covered in tests/migration-0010.mjs.
+await check('R2 refund retries are not starved by a persistent notification backlog', async () => {
+  env.BOOKLY_SYNC_ENABLED = 'false'; env.BOOKLY_SUBREQUEST_BUDGET = '40';
+  const stuck = localAppointment({ appointment_date: openDay(), start_time: '09:00', status: 'cancelled', payment_method: 'stripe', payment_status: 'paid', stripe_checkout_session_id: 'cs_test_r2' });
+  checkoutSessions.set('cs_test_r2', { id: 'cs_test_r2', payment_status: 'paid', payment_intent: 'pi_r2' });
+  db.prepare("INSERT INTO payment_refunds(id,appointment_id,amount_cents,status,requested_by) VALUES (?,?,3500,'failed','staff-1')").run(`refund-${stuck.id}`, stuck.id);
+  for (let i = 0; i < 30; i += 1) {
+    const row = localAppointment({ appointment_date: nthOpenDay(i % 5), start_time: clock(600 + 40 * Math.floor(i / 5)), status: 'cancelled' });
+    db.prepare("INSERT INTO booking_changes(id,appointment_id,revision,action,actor_id,previous_date,previous_time) VALUES (?,?,1,'cancel','staff-1',?,?)").run(`c-${row.id}`, row.id, row.appointment_date, row.start_time);
+    db.prepare("INSERT INTO booking_obligations(id,appointment_id,change_id,kind) VALUES (?,?,?,'notify')").run(`notify/${row.id}`, row.id, `c-${row.id}`);
+  }
+  for (let i = 0; i < 3; i += 1) { clockOffset += 60_000; await scheduled.runScheduledTasks(); }
+  assert.ok(db.prepare("SELECT COUNT(*) n FROM booking_obligations WHERE status='pending'").get().n > 0, 'the email backlog persists');
+  assert.ok(deliveries.length > 0, 'emails still progress');
+  assert.equal(appointment(stuck.id).payment_status, 'refunded', `the due refund was attempted (${stripeRefundCalls} calls)`);
+});
+await check('R3 overlapping checkout retries return the stored session; the losing session is expired', async () => {
+  markFresh(); const body = stripeRequest();
+  commandsDown = true; await book(body); commandsDown = false; markFresh();
+  const id = db.prepare('SELECT id FROM appointments').get().id;
+  db.prepare('UPDATE appointments SET payment_expires_at=? WHERE id=?').run(new TestDate(TestDate.now() + 31 * 60_000).toISOString(), id);
+  let second;
+  afterCheckoutCreate = async () => { clockOffset += 2 * 60_000; markFresh(); second = await book(body); };
+  const first = await book(body);
+  const stored = appointment(id).stripe_checkout_session_id;
+  assert.equal(checkoutCreates, 2, 'the race created two sessions');
+  assert.equal(second.body.checkoutUrl, checkoutSessions.get(stored).url);
+  assert.equal(first.body.checkoutUrl, checkoutSessions.get(stored).url, 'the losing request returns the stored session');
+  const loser = [...checkoutSessions.values()].find(session => session.id.startsWith('cs_test_') && session.id !== stored);
+  assert.equal(loser.status, 'expired', 'the unstored session can no longer be paid');
+});
+await check('R4 resolving a held reschedule as "keep Bookly" keeps its email blocked until Bookly is adopted', async () => {
+  markFresh(); const date = openDay();
+  const moved = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [moved.id]);
+  commandsDown = true;
+  await changeBooking({ reference: moved.reference, revision: 0, action: 'reschedule', date, time: '11:00' });
+  remoteRow({ ...remoteOf(moved.id), notes: 'edited in Bookly' });
+  localAppointment({ appointment_date: date, start_time: '10:00' }); // the old time is taken locally: the move cannot be restored
+  commandsDown = false;
+  await syncRun();
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='held'").get(moved.id).n, 1, 'the rejected move is held');
+  assert.equal((await booklyAction({ action: 'resolve', localId: moved.id, keep: 'bookly' })).status, 200);
+  bridgeDown = true;
+  for (let i = 0; i < 3; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
+  assert.equal(deliveriesFor(moved.reference).length, 0, 'no email for the time staff did not keep');
+  bridgeDown = false; markFresh();
+  for (let i = 0; i < 2; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
+  assert.equal(appointment(moved.id).start_time, '10:00', 'the Bookly version is adopted');
+  assert.equal(deliveriesFor(moved.reference).length, 0);
+  assert.deepEqual({ ...db.prepare("SELECT status,outcome FROM booking_obligations WHERE kind='notify'").get() }, { status: 'done', outcome: 'superseded' });
+});
+await check('R4 resolving a held reschedule as "keep local" sends its email only after Bookly accepts it', async () => {
+  markFresh(); const date = openDay();
+  const moved = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [moved.id]);
+  commandsDown = true;
+  await changeBooking({ reference: moved.reference, revision: 0, action: 'reschedule', date, time: '11:00' });
+  remoteRow({ ...remoteOf(moved.id), notes: 'edited in Bookly' });
+  localAppointment({ appointment_date: date, start_time: '10:00' });
+  commandsDown = false;
+  await syncRun(); await syncRun();
+  assert.equal((await booklyAction({ action: 'resolve', localId: moved.id, keep: 'local' })).status, 200);
+  bridgeDown = true;
+  for (let i = 0; i < 3; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
+  assert.equal(deliveriesFor(moved.reference).length, 0, 'no email before Bookly accepts the kept version');
+  bridgeDown = false; markFresh();
+  for (let i = 0; i < 2; i += 1) { clockOffset += 2 * 60_000; await scheduled.runScheduledTasks(); }
+  assert.equal(remoteOf(moved.id).time, '11:00');
+  assert.equal(deliveriesFor(moved.reference).length, 1);
+  assert.equal((await booklyStatus()).body.conflicts.length, 0);
+});
+await check('R5 a Checkout creation with an uncertain outcome keeps the hold, and the retry recovers the session', async () => {
+  markFresh(); const body = stripeRequest();
+  checkoutFailure = 'uncertain';
+  const initial = await book(body);
+  assert.equal(initial.status, 503);
+  const row = db.prepare('SELECT * FROM appointments').get();
+  assert.equal(row.status, 'payment_pending', 'the hold is retained'); assert.equal(slotTimes(row.id).length, 8);
+  const retry = await book(body);
+  assert.ok(retry.body.checkoutUrl, JSON.stringify(retry.body));
+  assert.equal(checkoutCreates, 1, 'the retry recovers the session Stripe created');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM appointments').get().n, 1);
+});
+await check('R5 a Checkout creation Stripe rejects still releases the hold (unchanged)', async () => {
+  markFresh(); const body = stripeRequest();
+  checkoutFailure = 'definite';
+  assert.equal((await book(body)).status, 503);
+  const row = db.prepare('SELECT * FROM appointments').get();
+  assert.equal(row.status, 'payment_expired'); assert.equal(slotTimes(row.id).length, 0);
+});
+await check('R6 a worker that lost its lease during a command request does not overwrite the newer link', async () => {
+  markFresh(); const date = openDay();
+  const linked = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [linked.id]);
+  db.prepare("UPDATE appointments SET notes='local edit',revision=revision+1 WHERE id=?").run(linked.id);
+  commandsDown = true; await bridge.pushBooklyChanges(database, [linked.id]).catch(() => {}); commandsDown = false;
+  const newer = 'f'.repeat(64);
+  beforeCommand = () => {
+    clockOffset += 121_000;
+    db.prepare("UPDATE bookly_sync_state SET lease='replacement-owner',lease_until=? WHERE id=1").run(TestDate.now() + 120_000);
+    db.prepare('UPDATE bookly_links SET remote_version=? WHERE local_id=?').run(newer, linked.id); // the replacement's newer receipt
+  };
+  const run = await syncRun();
+  assert.equal(run.ok, false); assert.match(run.error, /lease/);
+  assert.equal(db.prepare('SELECT remote_version FROM bookly_links WHERE local_id=?').get(linked.id).remote_version, newer, 'the stale receipt is not written');
+});
+await check('R7 "keep Bookly" is refused for a service or duration change it cannot apply', async () => {
+  markFresh(); const date = openDay();
+  const changed = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [changed.id]);
+  remoteRow({ ...remoteOf(changed.id), durationMinutes: 45 });
+  await syncRun();
+  assert.ok(db.prepare('SELECT 1 FROM bookly_conflicts WHERE local_id=?').get(changed.id));
+  const refused = await booklyAction({ action: 'resolve', localId: changed.id, keep: 'bookly' });
+  assert.equal(refused.status, 409, 'not reported as resolved');
+  assert.ok(db.prepare('SELECT 1 FROM bookly_conflicts WHERE local_id=?').get(changed.id), 'the conflict stays held');
+  assert.equal((await booklyAction({ action: 'resolve', localId: changed.id, keep: 'local' })).status, 200);
+  assert.equal((await syncRun()).ok, true);
+  assert.equal(remoteOf(changed.id).durationMinutes, 30); assert.equal((await booklyStatus()).body.conflicts.length, 0);
+});
+await check('R8 "keep local" works for a rejected command whose Bookly twin never changed', async () => {
+  markFresh(); const date = openDay();
+  const linked = localAppointment({ appointment_date: date, start_time: '10:00' });
+  await bridge.pushBooklyChanges(database, [linked.id]);
+  const native = remoteRow({ date, time: '11:00' });
+  db.prepare("UPDATE appointments SET start_time='11:00',end_time='11:30',revision=revision+1 WHERE id=?").run(linked.id);
+  await bridge.pushBooklyChanges(database, [linked.id]).catch(() => {});
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM bookly_commands WHERE local_id=? AND status='held'").get(linked.id).n, 1);
+  await syncRun(); await syncRun();
+  remote.delete(native.remoteId); // staff cleared the Bookly slot
+  const resolved = await booklyAction({ action: 'resolve', localId: linked.id, keep: 'local' });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved.body));
+  assert.equal((await syncRun()).ok, true);
+  assert.equal(remoteOf(linked.id).time, '11:00'); assert.equal((await booklyStatus()).body.conflicts.length, 0);
 });
 
 console.log(results.join('\n'));
