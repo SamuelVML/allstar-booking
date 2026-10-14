@@ -1,0 +1,4 @@
+{"confirmationEmailSent":false,"booking":{"reference":"AS-20261017-0F88","serviceName":"Haircut","date":"2026-10-17","time":"11:00","endTime":"11:30","durationMinutes":30,"priceCents":3500,"paymentMethod":"Pay at the shop","loyalty":{"currentPoints":0,"rewardAt":10,"pendingPoint":1}}}
+HTTP 201
+{"error":"That time was just booked. Please choose another time."}
+HTTP 409
