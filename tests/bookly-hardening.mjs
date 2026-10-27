@@ -78,7 +78,7 @@ function load(relative) {
   vm.runInNewContext(code, { module: m, exports: m.exports, console, crypto, TextEncoder, TextDecoder, URL, Request, Response, Headers, AbortSignal, Date, Error, setTimeout, fetch: fakeFetch,
     require(name) {
       if (name === 'cloudflare:workers') return { env };
-      if (name === '@/lib/refunds') return { async refundCancelledBooking(_db, row) { if (row.payment_method === 'stripe' && row.payment_status === 'paid') refundCalls++; return 'not_needed'; } };
+      if (name === '@/lib/refunds') return { async refundCancelledBooking(_db, row) { if (row.payment_method === 'stripe' && row.payment_status === 'paid') refundCalls++; return 'not_needed'; }, recordRefundDue: db => db.prepare('SELECT 1'), async retryDueRefunds() {} };
       if (name === '@/lib/stripe') return { stripeIsConfigured: () => false, getStripeClient() { throw new Error('Stripe is not used in these tests'); } };
       if (name === '@/lib/booking-email') return { async sendBookingConfirmation() { return true; } };
       if (name === '@/db') return { getD1: () => database };

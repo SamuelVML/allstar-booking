@@ -1,0 +1,36 @@
+
+> site-creator-vinext-starter@0.1.0 test
+> npm run test:booking-management && node tests/native-api.mjs && npm run test:backstage && node tests/booking-email-retry.mjs && npm run test:backstage-render
+
+
+> site-creator-vinext-starter@0.1.0 test:booking-management
+> node tests/booking-management.mjs
+
+PASS: signed staff tokens, spoofed headers, issuer/audience/expiry/allowlist, CSRF and protected routes
+Automatic Stripe refund failed retryable Error: Temporary Stripe failure
+    at Object.create (file:///private/tmp/allstar-release-audit/baseline/tests/booking-management.mjs:29:19)
+    at refundCancelledBooking (/private/tmp/allstar-release-audit/baseline/lib/refunds.ts:37:45)
+    at async Object.POST (/private/tmp/allstar-release-audit/baseline/app/api/admin/bookings/change/route.ts:43:15)
+    at async file:///private/tmp/allstar-release-audit/baseline/tests/booking-management.mjs:167:30
+PASS: migrations, buffer/break checks, stale edits, slot-race rollback, cancellation, paid status, loyalty once, webhook replay safety
+PASS: time-off collisions and removal, walk-in buffers and completion, payment ledger/replays, concurrent block rollback, protected operations
+PASS: editable settings persist with revision checks and full-day time off uses configured hours
+PASS: real-time cutoffs, compact-gap ranking and distinct-day customer recommendations
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+400 !== 200
+
+    at file:///private/tmp/allstar-release-audit/baseline/tests/native-api.mjs:116:8 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 400,
+  expected: 200,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.21.0

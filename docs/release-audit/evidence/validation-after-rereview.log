@@ -1,0 +1,14 @@
+## tsc
+exit=0
+## lint (preserved audit evidence scripts excluded; files with warnings, then total)
+app/site-home.tsx
+✖ 3 problems (0 errors, 3 warnings)
+
+## build
+    Automatic classification will be improved in a future release.
+
+  Build complete. Run `vinext start` to start the production server.
+
+## drizzle
+Everything's fine 🐶🔥
+No schema changes, nothing to migrate 😴

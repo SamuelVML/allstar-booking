@@ -57,7 +57,7 @@ const modules=new Map();
 function load(relative){const filename=path.resolve(relative);if(modules.has(filename))return modules.get(filename).exports;const m={exports:{}};modules.set(filename,m);
  const code=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  vm.runInNewContext(code,{module:m,exports:m.exports,console,crypto,TextEncoder,TextDecoder,URL,Request,Response,Headers,AbortSignal,Date,Error,fetch:fakeFetch,
- require(name){if(name==='cloudflare:workers')return {env};if(name==='@/lib/refunds')return {async refundCancelledBooking(_db,row){if(row.payment_method==='stripe'&&row.payment_status==='paid')refundCalls++;return 'not_needed';}};
+ require(name){if(name==='cloudflare:workers')return {env};if(name==='@/lib/refunds')return {async refundCancelledBooking(_db,row){if(row.payment_method==='stripe'&&row.payment_status==='paid')refundCalls++;return 'not_needed';},recordRefundDue:db=>db.prepare('SELECT 1'),async retryDueRefunds(){}};
  if(name==='@/db')return {getD1:()=>database};if(name.startsWith('@/'))return load(name.slice(2)+'.ts');return require(name);}});return m.exports;}
 const bridge=load('lib/bookly.ts');
 await bridge.synchronizeBookly(database);assert.equal(requests,0,'disabled integration makes no external call');
@@ -103,8 +103,10 @@ const id2=crypto.randomUUID();db.prepare(`INSERT INTO appointments(id,reference,
 await bridge.synchronizeBookly(database);
 db.prepare("UPDATE appointments SET start_time='11:15',end_time='11:45',revision=revision+1 WHERE id=?").run(id2);
 const other=[...remote.values()].find(r=>r.localId===id2);other.time='12:00';other.endTime='12:30';other.version='e'.repeat(64);
-await assert.rejects(()=>bridge.synchronizeBookly(database),/Both calendars changed/);
+// Held for staff reconciliation without stopping the run (release audit finding 3).
+await bridge.synchronizeBookly(database);
 assert.equal(db.prepare('SELECT start_time FROM appointments WHERE id=?').get(id2).start_time,'11:15');
+assert.match(db.prepare('SELECT reason FROM bookly_conflicts WHERE local_id=?').get(id2).reason,/Both calendars changed/);
 assert.equal(db.prepare('SELECT lease_until FROM bookly_sync_state').get().lease_until,0,'errors release the lease');
 db.prepare('UPDATE bookly_sync_state SET lease_until=?').run(Date.now()+50000);
 await assert.rejects(()=>bridge.synchronizeBookly(database),/in progress/);
