@@ -3,6 +3,7 @@ import { addMinutes, buildAvailableTimes, getService, makeSlotKeys } from "@/lib
 import { BookingConflict, validManagementDate } from "@/lib/booking-management";
 import { readBookingSettings, type StoredBookingSettings } from "@/lib/booking-settings";
 import type { ManagedBooking } from "@/lib/booking-management";
+import { cancellationObligations } from "@/lib/booking-obligations";
 
 async function batch(database: D1Database, statements: D1PreparedStatement[]) {
   try { return await database.batch(statements); }
@@ -56,7 +57,7 @@ function datesBetween(fromDate: string, toDate: string) {
   return dates;
 }
 
-export async function blockFullDays(
+function fullDayStatements(
   database: D1Database,
   input: { fromDate: string; toDate: string; reason: string },
   actor: string,
@@ -97,8 +98,69 @@ export async function blockFullDays(
     blockedDays += 1;
   }
   if (blockedDays === 0) throw new BookingConflict("That period contains no open shop days.");
+  return { statements, blockedDays };
+}
+
+export async function blockFullDays(
+  database: D1Database,
+  input: { fromDate: string; toDate: string; reason: string },
+  actor: string,
+  stored: StoredBookingSettings,
+) {
+  const { statements, blockedDays } = fullDayStatements(database, input, actor, stored);
   await batch(database, statements);
   return blockedDays;
+}
+
+/** Block a vacation and cancel the bookings it covers in one D1 transaction.
+ *
+ * Each booking is guarded: if it changed since it was read (revision, status
+ * or payment), the guard row violates its CHECK constraint and the whole batch
+ * rolls back, including the vacation. Slots are released before the time-off
+ * slots are inserted, so the overlap triggers still reject any booking that
+ * appeared concurrently (rolling everything back). Refund and email
+ * obligations are written in the same transaction and processed after commit.
+ */
+export async function blockFullDaysCancelling(
+  database: D1Database,
+  input: { fromDate: string; toDate: string; reason: string },
+  conflicts: ManagedBooking[],
+  actor: string,
+  stored: StoredBookingSettings,
+) {
+  const { statements: timeOff, blockedDays } = fullDayStatements(database, input, actor, stored);
+  const statements: D1PreparedStatement[] = [];
+  const changeIds: string[] = [];
+  for (const booking of conflicts) {
+    if (booking.source === "bookly" || booking.status !== "confirmed") {
+      throw new BookingConflict("The booking changed. Refresh before retrying.");
+    }
+    const changeId = crypto.randomUUID();
+    const guard = crypto.randomUUID();
+    changeIds.push(changeId);
+    statements.push(
+      database.prepare(`INSERT INTO bookly_revision_guards (id, valid)
+        SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM appointments WHERE id = ? AND revision = ? AND status = 'confirmed'
+          AND payment_status = ? AND payment_method = ?) THEN 1 ELSE 0 END`)
+        .bind(guard, booking.id, booking.revision, booking.payment_status, booking.payment_method),
+      database.prepare(`INSERT INTO booking_changes (id, appointment_id, revision, action, actor_id, previous_date, previous_time)
+        SELECT ?, id, revision + 1, 'cancel', ?, appointment_date, start_time FROM appointments WHERE id = ? AND revision = ?`)
+        .bind(changeId, actor, booking.id, booking.revision),
+      database.prepare("DELETE FROM appointment_slots WHERE appointment_id = ?").bind(booking.id),
+      database.prepare("UPDATE appointments SET status = 'cancelled', revision = revision + 1 WHERE id = ? AND revision = ?")
+        .bind(booking.id, booking.revision),
+      ...cancellationObligations(database, booking, changeId),
+      database.prepare("DELETE FROM bookly_revision_guards WHERE id = ?").bind(guard),
+    );
+  }
+  try { await database.batch([...statements, ...timeOff]); }
+  catch (error) {
+    if (error instanceof Error && /CHECK constraint failed|UNIQUE constraint failed|Slot unavailable/.test(error.message)) {
+      throw new BookingConflict("A booking or the calendar changed. Nothing was cancelled; refresh before retrying.");
+    }
+    throw error;
+  }
+  return { blockedDays, changeIds };
 }
 
 export async function removeBlock(database: D1Database, id: string, actor: string) {

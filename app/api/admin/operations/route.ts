@@ -5,6 +5,7 @@ import { authoriseStaffMutation } from "@/lib/staff-auth";
 import { BookingConflict } from "@/lib/booking-management";
 import {
   blockFullDays,
+  blockFullDaysCancelling,
   blockTime,
   createWalkIn,
   recordPayment,
@@ -13,9 +14,8 @@ import {
 } from "@/lib/backstage";
 import { releaseExpiredPaymentReservations } from "@/lib/payments";
 import { readBookingSettings } from "@/lib/booking-settings";
-import { changeBooking } from "@/lib/booking-management";
 import { refundCancelledBooking } from "@/lib/refunds";
-import { sendBookingChangeNotification } from "@/lib/booking-email";
+import { obligationSummary, processBookingObligations } from "@/lib/booking-obligations";
 import type { ManagedBooking } from "@/lib/booking-management";
 
 const schema = z.discriminatedUnion("action", [
@@ -86,31 +86,22 @@ export async function POST(request: Request) {
         );
       }
 
-      // Reserve the vacation before any irreversible cancellation, refund or
-      // email side effect. Existing time off or an invalid range therefore
-      // fails without changing a customer booking.
-      const blockedDays = await blockFullDays(database, input, user.id, stored);
-
-      // Refund and notify each booking as soon as its cancellation commits. If a
-      // later cancellation fails, every committed one already has its refund
-      // (recorded in payment_refunds, retryable from Backstage) and its email.
-      // Stripe and Resend idempotency keys prevent duplicates on retry.
+      // No conflicts: the ordinary full-day block. With conflicts: one
+      // transaction cancels them, releases their slots, records their refund
+      // and email obligations and blocks the days, or changes nothing.
+      let blockedDays: number;
       let refundsPending = 0;
       let notificationsSent = true;
-      for (const booking of conflicts) {
-        const change = await changeBooking(database, booking, "cancel", user.id, undefined, stored);
-        const refundStatus = await refundCancelledBooking(database, booking, user.id);
-        if (refundStatus === "pending") refundsPending += 1;
-        if (booking.customer_email) {
-          notificationsSent =
-            (await sendBookingChangeNotification(
-              booking,
-              "cancel",
-              change.changeId,
-              undefined,
-              refundStatus,
-            )) && notificationsSent;
-        }
+      if (conflicts.length === 0) {
+        blockedDays = await blockFullDays(database, input, user.id, stored);
+      } else {
+        const committed = await blockFullDaysCancelling(database, input, conflicts, user.id, stored);
+        blockedDays = committed.blockedDays;
+        // Committed: process the obligations now; anything unfinished is
+        // retried by the Cron Trigger and reported here as pending.
+        try { await processBookingObligations(database, { changeIds: committed.changeIds, limit: committed.changeIds.length * 2 }); }
+        catch { console.error("Vacation obligations deferred to background retry"); }
+        ({ refundsPending, notificationsSent } = await obligationSummary(database, committed.changeIds));
       }
       const calendar = await pushAfterCommit(database, null);
       return Response.json({
