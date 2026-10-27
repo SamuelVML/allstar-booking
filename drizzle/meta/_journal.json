@@ -57,6 +57,13 @@
       "when": 1790084840278,
       "tag": "0007_schema_checkpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791842751560,
+      "tag": "0008_bookly_bridge",
+      "breakpoints": true
     }
   ]
 }

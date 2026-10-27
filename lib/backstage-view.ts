@@ -120,6 +120,9 @@ export function paymentInfo(
   appointment: AdminAppointment,
   paymentHoldMinutes = DEFAULT_BOOKING_SETTINGS.paymentHoldMinutes,
 ): PaymentInfo {
+  if (appointment.source === "bookly") return {
+    label: "Managed in Bookly", line: "Payment is managed in Bookly.", tone: "pending" as const,
+  };
   const paid = appointment.payment_status === "paid";
 
   if (appointment.payment_status === "refunded") {
@@ -163,6 +166,7 @@ export function paymentInfo(
 /** Staff may record a shop payment only against an unpaid, non-Stripe booking. */
 export function canRecordPayment(appointment: AdminAppointment) {
   return (
+    appointment.source !== "bookly" &&
     isLive(appointment) &&
     appointment.payment_status === "due_at_shop" &&
     appointment.payment_method !== "stripe"
@@ -170,7 +174,7 @@ export function canRecordPayment(appointment: AdminAppointment) {
 }
 
 export function canManage(appointment: AdminAppointment) {
-  return appointment.status === "confirmed";
+  return appointment.source !== "bookly" && appointment.status === "confirmed";
 }
 
 /** Everything that occupies chair time on this date, as [start, end) minutes. */

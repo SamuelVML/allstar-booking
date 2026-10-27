@@ -1,3 +1,4 @@
+import { assertBooklyFresh, filterBooklyTimes, booklyEnabled } from "@/lib/bookly";
 import { getD1 } from "@/db";
 import {
   buildAvailableTimes,
@@ -42,11 +43,13 @@ export async function GET(request: Request) {
     }
 
     await releaseExpiredPaymentReservations(database);
+    // Background sync keeps Bookly occupancy current; stale occupancy fails closed.
+    await assertBooklyFresh(database);
     const rangeStart = date || today;
     const rangeEnd = date || maximumDate;
     const rows = await database
       .prepare(
-        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
+        "SELECT slot_start, kind FROM (SELECT slot_start, 'appointment' AS kind FROM appointment_slots UNION ALL SELECT slot_start, 'appointment' AS kind FROM bookly_occupied_slots UNION ALL SELECT slot_start, 'time_off' AS kind FROM time_off_slots) WHERE slot_start >= ? AND slot_start < ?",
       )
       .bind(`${rangeStart}T00:00`, `${rangeEnd}T23:59`)
       .all<{ slot_start: string; kind: "appointment" | "time_off" }>();
@@ -58,7 +61,7 @@ export async function GET(request: Request) {
 
     if (!date) {
       const availableDays = [];
-      for (let offset = 0; offset <= settings.bookingWindowDays; offset += 1) {
+      for (let offset = 0; offset <= (booklyEnabled() ? Math.min(14, settings.bookingWindowDays) : settings.bookingWindowDays); offset += 1) {
         const candidateDate = addDays(today, offset);
         const times = buildAvailableTimes(
           candidateDate,
@@ -71,8 +74,9 @@ export async function GET(request: Request) {
         );
         if (times.length > 0) availableDays.push({ date: candidateDate, times });
       }
+      const filteredDays = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, availableDays);
       const recommendations = rankRecommendations({
-        availableDays,
+        availableDays: filteredDays,
         occupiedSlots: appointmentSlots,
         durationMinutes,
         serviceName: service.name,
@@ -92,18 +96,12 @@ export async function GET(request: Request) {
       }, { headers: NO_STORE_HEADERS });
     }
 
+    const localTimes = buildAvailableTimes(date, durationMinutes, occupied, settings.handlingBufferMinutes, settings.onlineLeadMinutes, now, settings);
+    const filtered = await filterBooklyTimes(service.id + (colourAddOn ? "+colour" : ""), durationMinutes + settings.handlingBufferMinutes, [{ date, times: localTimes }]);
     return Response.json({
       date,
       service: service.id,
-      times: buildAvailableTimes(
-        date,
-        durationMinutes,
-        occupied,
-        settings.handlingBufferMinutes,
-        settings.onlineLeadMinutes,
-        now,
-        settings,
-      ),
+      times: filtered[0].times,
       generatedAt: now.toISOString(),
       validUntil: new Date(now.getTime() + 60_000).toISOString(),
     }, { headers: NO_STORE_HEADERS });

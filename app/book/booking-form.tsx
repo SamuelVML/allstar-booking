@@ -75,11 +75,16 @@ declare global {
   }
 }
 
+// Keep the same request ID across a failed/uncertain response. The server can
+// then return the saved booking instead of creating another appointment.
+let pendingBooking: { input: string; requestId: string } | null = null;
 async function createBooking(input: BookingInput) {
+  const fingerprint = JSON.stringify(input);
+  if (!pendingBooking || pendingBooking.input !== fingerprint) pendingBooking = { input: fingerprint, requestId: crypto.randomUUID() };
   const response = await fetch("/api/bookings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, requestId: pendingBooking.requestId }),
   });
   const result = (await response.json()) as {
     booking?: Confirmation;
@@ -89,6 +94,7 @@ async function createBooking(input: BookingInput) {
   if (!response.ok || (!result.booking && !result.checkoutUrl)) {
     throw new Error(result.error ?? "Booking failed.");
   }
+  pendingBooking = null;
   return result;
 }
 
